@@ -187,13 +187,13 @@ it doesn't need a trait at all; just write a pure function.
 | M1 Skeleton & build pipeline | ✅ Done | Workspace + container build via `scripts/firmware.sh`. ELF built (~26 MB debug, ~2 MB release). |
 | M2 Trait surface + fakes | ✅ Done | All traits in `core::traits`. Host fakes in `host/src/fakes.rs`. Firmware skeletons in `firmware/src/hw_*.rs` — placeholders for ADC/PCNT/GPIO. |
 | M3 WiFi multi-SSID + AP fallback | ✅ Compiles, **untested on hardware** | `firmware::net_wifi::WifiSupervisor` runs its own thread, walks the configured SSID list with retry, falls back to AP+captive-portal mode when none reach. |
-| M4 HTTP server + SPA + logs | ✅ Core done, WS deferred | Embedded vanilla-JS SPA, HTTPD on firmware, axum on host. Live logs via telnet (TCP/23) wired; WebSocket logs deferred to follow-up. |
+| M4 HTTP server + SPA + logs | ✅ Done | Embedded vanilla-JS SPA (Dashboard + Settings tabs), HTTPD on firmware, axum on host. Live logs over **WebSocket** + telnet (TCP/23). WS verified through QEMU. |
 | M5 Sensors | 🟡 Pipeline wired with placeholders | Sensor task reads ADC/PCNT, applies calibration, populates the snapshot. Real `PlaceholderAdc`/`PlaceholderPcnt` need to be replaced with ESP-IDF oneshot ADC + PCNT v5 wrappers. |
 | M6 Switches + valve sequencer | ✅ Core sequencer done, **firmware GPIOs not wired** | `core::water_valve` with full state-machine tests. Firmware needs to thread individual `PinDriver`s through to the valve outputs. |
 | M7 MQTT + HA Discovery | ✅ Compiles, **untested on hardware** | `firmware::mqtt_client::EspMqtt` wraps `esp-idf-svc`'s `EspMqttClient`. Supervisor task connects after STA up, publishes Discovery + retained state on (re)connect, routes commands. |
 | M8 NVS-backed runtime config | ✅ Done | Schema in `core::config`. Firmware loads on boot, persists on edit (60s coalescing thread). |
 | M9 Schedule engine | ✅ Done | `core::schedule` with cron-like rules. Firmware spawns the executor at 30 s tick. Local-time conversion uses a fixed +01:00 offset until chrono-tz is added. |
-| M10 OTA | ⏳ Stub | Skeleton at `firmware::net_ota`. Real wiring deferred — needs hardware to validate rollback. |
+| M10 OTA | ✅ Compiles, host-untested rollback | `POST /api/ota` streams body into inactive slot via `EspOta::initiate_update`/`write`/`complete`, then reboots. Boot path calls `mark_running_slot_valid()` after self-test passes. Rollback only verifiable on hardware. |
 | M11 Wireguard | ⏳ Stub | Skeleton at `firmware::net_wg`. Highest risk; should be last per plan. |
 
 **What's tested:** `cargo test -p watercontroller-core` exercises calibration, valve sequencing (with fake clock), schedule evaluation (incl. missed-minute recovery and DST-jump cap), HA Discovery payload shapes, MQTT command routing, NVS round-trip, log ring buffer eviction. **No firmware-side hardware behavior is tested** because there is no board attached during this scaffolding pass.
