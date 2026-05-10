@@ -201,6 +201,21 @@
       </div>
     </section>
     <section class="card full">
+      <h2>Firmware update (OTA)</h2>
+      <p class="status-msg">Pick a release-built <code>watercontroller-firmware</code> ELF and
+        upload. The device writes it to the inactive OTA slot and reboots; if the new firmware
+        fails its self-test the bootloader rolls back automatically.</p>
+      <div class="row">
+        <input type="file" id="ota-file" accept="*/*">
+        <button class="btn primary" id="ota-upload">Upload &amp; reboot</button>
+        <span class="status-msg" id="ota-msg"></span>
+      </div>
+      <div class="row">
+        <progress id="ota-progress" value="0" max="100" style="width: 100%; display: none;"></progress>
+      </div>
+    </section>
+
+    <section class="card full">
       <h2>Danger zone</h2>
       <p class="status-msg">Factory reset wipes the persisted config and reboots the device.
         Useful if WiFi credentials get the device into an unreachable state.</p>
@@ -368,6 +383,33 @@
     } catch (e) {
       msg.textContent = "save failed: " + e.message;
       msg.className = "status-msg err";
+    }
+  });
+
+  $("#ota-upload").addEventListener("click", async () => {
+    const file = $("#ota-file").files[0];
+    const msg = $("#ota-msg"), prog = $("#ota-progress");
+    if (!file) { msg.textContent = "pick a firmware file first"; msg.className = "status-msg err"; return; }
+    if (!confirm(`Upload ${file.name} (${(file.size/1024).toFixed(0)} KB) and reboot?`)) return;
+    msg.textContent = "uploading…"; msg.className = "status-msg";
+    prog.style.display = ""; prog.value = 0;
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/ota");
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.upload.onprogress = (e) => { if (e.lengthComputable) prog.value = (e.loaded / e.total) * 100; };
+      xhr.onload = () => {
+        if (xhr.status === 202) {
+          msg.textContent = "accepted; device rebooting"; msg.className = "status-msg ok";
+        } else {
+          msg.textContent = `upload failed (HTTP ${xhr.status}): ${xhr.responseText}`;
+          msg.className = "status-msg err";
+        }
+      };
+      xhr.onerror = () => { msg.textContent = "network error"; msg.className = "status-msg err"; };
+      xhr.send(file);
+    } catch (e) {
+      msg.textContent = "request failed: " + e.message; msg.className = "status-msg err";
     }
   });
 

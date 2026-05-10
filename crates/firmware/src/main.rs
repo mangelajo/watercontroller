@@ -162,6 +162,10 @@ fn main() -> Result<()> {
     let reset_reason_str = reset_reason_label(reset_reason);
     info!("reset reason: {reset_reason_str}");
 
+    // Self-test passed: HTTPD is up + tasks spawned. Cancel any pending
+    // OTA rollback so the bootloader keeps booting this slot.
+    net_ota::mark_app_valid();
+
     loop {
         std::thread::sleep(Duration::from_secs(10));
         let uptime_ms = clock.monotonic_ms().saturating_sub(started);

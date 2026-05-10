@@ -38,3 +38,6 @@ CONFIG_FREERTOS_HZ=1000
 # QEMU's open_eth virtual NIC. Adds ~few KB on real hardware where it goes
 # unused; cheap insurance for a ground-truth simulator.
 CONFIG_ETH_USE_OPENETH=y
+
+# WebSocket support in the ESP-IDF HTTP server (used for /ws/logs).
+CONFIG_HTTPD_WS_SUPPORT=y
