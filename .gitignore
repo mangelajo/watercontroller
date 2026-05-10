@@ -11,6 +11,9 @@ __pycache__/
 .venv/
 .pytest_cache/
 
+# Build-time secrets (WiFi creds etc.) — see .env.example.
+.env
+
 # Editor
 .vscode/
 .idea/

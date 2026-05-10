@@ -32,8 +32,23 @@ fn default_ap_ssid() -> String {
 
 impl Default for WifiConfig {
     fn default() -> Self {
+        // Optional build-time WiFi seed: if SSID and PASSWORD are set in
+        // `.env` at the workspace root (which `crates/core/build.rs`
+        // forwards via `cargo:rustc-env=`), bake them into the default
+        // config so a freshly-flashed device joins the lab network on
+        // first boot. Empty / unset = no networks (AP fallback on boot).
+        let seed = match (
+            option_env!("WC_WIFI_SSID"),
+            option_env!("WC_WIFI_PASSWORD"),
+        ) {
+            (Some(ssid), Some(password)) if !ssid.is_empty() => vec![WifiCreds {
+                ssid: ssid.into(),
+                password: password.into(),
+            }],
+            _ => Vec::new(),
+        };
         Self {
-            networks: Vec::new(),
+            networks: seed,
             hostname: default_hostname(),
             ap_ssid: default_ap_ssid(),
             ap_password: String::new(),
