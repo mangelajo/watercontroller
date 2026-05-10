@@ -936,13 +936,40 @@
       hideLoading();
     }
   }
+  // Map UI tab name → server endpoint + payload builder. PUTs hit the
+  // per-section endpoints so each save round-trips ~100-700 B instead of
+  // the full ~1.5 KiB Config blob; the device's httpd buffers and stack
+  // are sized for the smaller payload.
+  const SECTION_MAP = {
+    wifi:       { path: "/api/config/wifi",      body: () => currentConfig.wifi },
+    sprinklers: { path: "/api/config/switches",  body: () => currentConfig.switches },
+    mqtt:       { path: "/api/config/mqtt",      body: () => currentConfig.mqtt },
+    schedule:   { path: "/api/config/schedule",  body: () => currentConfig.schedule },
+    time:       { path: "/api/config/time",      body: () => ({
+                    timezone: currentConfig.timezone,
+                    sntp_servers: currentConfig.sntp_servers,
+                  }) },
+    sensors:    { path: "/api/config/sensors",   body: () => currentConfig.sensors },
+    https:      { path: "/api/config/https",     body: () => currentConfig.https },
+    wg:         { path: "/api/config/wireguard", body: () => currentConfig.wireguard },
+    auth:       { path: "/api/config/auth",      body: () => ({
+                    admin_token: currentConfig.admin_token,
+                  }) },
+    // Advanced JSON editor keeps the full /api/config PUT for backup/
+    // restore (and so users can edit fields the per-section forms don't
+    // expose).
+    cfg:        { path: "/api/config",           body: () => currentConfig },
+  };
+
   async function saveConfig(section) {
+    const map = SECTION_MAP[section];
+    if (!map) { console.warn("unknown section", section); return; }
     msgInfo(`#${section}-msg`, "saving…");
     try {
-      const r = await fetch("/api/config", {
+      const r = await fetch(map.path, {
         method: "PUT",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify(currentConfig),
+        body: JSON.stringify(map.body()),
       });
       if (r.status === 401) { msgErr(`#${section}-msg`, "401 — admin token missing/wrong"); return; }
       if (!r.ok) throw new Error("HTTP " + r.status);

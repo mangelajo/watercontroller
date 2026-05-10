@@ -15,9 +15,23 @@ use esp_idf_svc::ws::FrameType;
 use std::sync::{Arc, Mutex};
 use watercontroller_core::api::{routes, ApiError, CommandOutcome, ConfigUpdate, SwitchCommand};
 use watercontroller_core::app::App;
-use watercontroller_core::config::Config;
+use watercontroller_core::config::{
+    Config, HttpsConfig, MqttConfig, SensorsConfig, SwitchesConfig, WifiConfig, WireguardConfig,
+};
 use watercontroller_core::log_buffer;
+use watercontroller_core::schedule::Schedule;
 use watercontroller_core::traits::NvsStore;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TimeSection {
+    timezone: String,
+    sntp_servers: Vec<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AuthSection {
+    admin_token: String,
+}
 
 const READ_BUF_LEN: usize = 1024;
 const MAX_BODY: usize = 32 * 1024;
@@ -82,10 +96,13 @@ const JSON_CT: &[(&str, &str)] = &[("Content-Type", "application/json")];
 const HTML_CT: &[(&str, &str)] = &[("Content-Type", "text/html; charset=utf-8")];
 
 /// Default 6 KiB HTTPD task stack overflowed under PUT /api/config (full
-/// Config deserialisation + multiple mutex acquisitions). 12 KiB plain,
-/// 16 KiB for TLS (mbedTLS handshake chews a lot of stack).
-const HTTP_STACK: usize = 12 * 1024;
-const HTTPS_STACK: usize = 16 * 1024;
+/// Config deserialisation + multiple mutex acquisitions). With per-section
+/// config endpoints (added Q2 2026), the largest body the dispatcher
+/// deserialises is the HTTPS section (cert + key ~750 B) — so 8 KiB plain
+/// and 12 KiB TLS comfortably cover peak usage (measured ~3 KiB) with
+/// headroom for mbedTLS handshake stack on the secure side.
+const HTTP_STACK: usize = 8 * 1024;
+const HTTPS_STACK: usize = 12 * 1024;
 
 /// Two server handles — one plain on :80, an optional TLS one on :443. The
 /// caller must hold this for the lifetime of the device; dropping shuts the
@@ -113,12 +130,15 @@ pub fn spawn(
     // drained by a single fanout thread spawned at the end of this fn.
     let ws_senders: Arc<Mutex<Vec<EspHttpWsDetachedSender>>> = Arc::new(Mutex::new(Vec::new()));
 
-    // Plain HTTP on `port`.
-    let http_cfg = esp_idf_svc::http::server::Configuration {
-        http_port: port,
-        stack_size: HTTP_STACK,
-        ..Default::default()
-    };
+    // Plain HTTP on `port`. max_uri_handlers default is 32 — we register
+    // ~34 routes (8 captive-portal probes + 9 per-section pairs + 8 base
+    // routes + WS), so bump. Built as explicit field assignment because
+    // struct-literal-with-spread (`..Default::default()`) was silently
+    // dropping the override in this codebase — boot config printed 32.
+    let mut http_cfg = esp_idf_svc::http::server::Configuration::default();
+    http_cfg.http_port = port;
+    http_cfg.stack_size = HTTP_STACK;
+    http_cfg.max_uri_handlers = 64;
     let mut http = EspHttpServer::new(&http_cfg)?;
     register_handlers(&mut http, app.clone(), nvs.clone(), ws_senders.clone())?;
     log::info!("http: listening on :{port}");
@@ -128,24 +148,23 @@ pub fn spawn(
     #[cfg(esp_idf_esp_https_server_enable)]
     let https = if !cert_pem.is_empty() && !key_pem.is_empty() {
         // TLS server's parallel-session cap. Browsers (Chromium) speculatively
-        // pre-connect with multiple TCP/TLS sessions; with cap=2 they queued
-        // behind each other and the SPA load felt sluggish. 4 matches the
-        // browser's typical inflight count for an origin and the heap budget
-        // (with MBEDTLS_DYNAMIC_BUFFER each idle session is small; only
-        // active handshakes burst ~12 KiB).
-        let mut tls_cfg = esp_idf_svc::http::server::Configuration {
-            http_port: port,
-            https_port: 443,
-            stack_size: HTTPS_STACK,
-            max_open_sockets: 4,
-            // The plain server already grabbed the default ctrl_port
-            // (32768). esp_https_server uses ctrl_port for an internal
-            // signaling socket; running two servers in the same process
-            // requires two distinct ports here, otherwise httpd_ssl_start
-            // returns ESP_FAIL.
-            ctrl_port: 32769,
-            ..Default::default()
-        };
+        // pre-connect with up to 6 TCP/TLS sessions per origin. 4 is the
+        // sweet spot for our heap budget: with cfg-persist removed and
+        // MBEDTLS_DYNAMIC_BUFFER on, we have ~28 KiB free / 16 KiB largest
+        // contiguous, comfortably above one TLS handshake's ~12 KiB peak.
+        // Explicit field assignment (see http_cfg comment for why we
+        // don't use struct-literal-with-spread).
+        let mut tls_cfg = esp_idf_svc::http::server::Configuration::default();
+        tls_cfg.http_port = port;
+        tls_cfg.https_port = 443;
+        tls_cfg.stack_size = HTTPS_STACK;
+        tls_cfg.max_open_sockets = 4;
+        tls_cfg.max_uri_handlers = 64;
+        // The plain server already grabbed the default ctrl_port (32768).
+        // esp_https_server uses ctrl_port for an internal signaling
+        // socket; running two servers in the same process requires two
+        // distinct ports here, otherwise httpd_ssl_start returns ESP_FAIL.
+        tls_cfg.ctrl_port = 32769;
         tls_cfg.server_certificate = Some(esp_idf_svc::tls::X509::pem(leak_cstr(cert_pem)));
         tls_cfg.private_key = Some(esp_idf_svc::tls::X509::pem(leak_cstr(key_pem)));
         match EspHttpServer::new(&tls_cfg) {
@@ -226,6 +245,7 @@ fn register_handlers(
 
     {
         let app = app.clone();
+        let nvs = nvs.clone();
         server.fn_handler::<EspIOError, _>(routes::CONFIG, Method::Put, move |mut req| {
             if require_auth(&req, &app).is_err() {
                 return write_unauthorized(req);
@@ -253,6 +273,21 @@ fn register_handlers(
                     // the default state, not an explicit clear).
                     let mut current = app.config();
                     current.merge_preserving_secrets(u.0);
+                    // Persist to NVS inline. PUTs are rare (a user clicking
+                    // Save) so the ~50-200 ms NVS write latency is fine,
+                    // and writing here lets us drop a dedicated polling
+                    // task — saves 8 KiB of pthread stack at idle.
+                    if let Err(e) = current.save(&*nvs) {
+                        log::error!("config: NVS save failed: {e}");
+                        let body = serde_json::to_vec(&ApiError::new(format!(
+                            "nvs save: {e}"
+                        )))
+                        .unwrap_or_default();
+                        let mut resp = req.into_response(500, None, JSON_CT)?;
+                        resp.write_all(&body)?;
+                        return Ok(());
+                    }
+                    log::info!("config: saved to NVS ({} bytes)", buf.len());
                     app.replace_config(current);
                     let _ = req.into_response(204, None, &[])?;
                 }
@@ -265,6 +300,109 @@ fn register_handlers(
             Ok(())
         })?;
     }
+
+    // Per-section config endpoints. Each section is GET-able (with secrets
+    // redacted same way as full /api/config) and PUT-able with merge-on-
+    // empty for the secret fields belonging to that section. Splitting like
+    // this lets the SPA save a single tab without round-tripping the full
+    // config payload (~1.5 KiB → 100 B–700 B per section), which means
+    // smaller request buffers on the server side.
+    register_section(
+        server,
+        "/api/config/wifi",
+        app.clone(), app.clone(), nvs.clone(),
+        |cfg| cfg.wifi.clone(),
+        |cfg, mut new: WifiConfig| {
+            // Per-network password merge: incoming password empty +
+            // matching SSID in stored config → keep stored.
+            for net in new.networks.iter_mut() {
+                if net.password.is_empty() {
+                    if let Some(o) = cfg.wifi.networks.iter().find(|n| n.ssid == net.ssid) {
+                        net.password = o.password.clone();
+                    }
+                }
+            }
+            cfg.wifi = new;
+        },
+    )?;
+    register_section(
+        server,
+        "/api/config/mqtt",
+        app.clone(), app.clone(), nvs.clone(),
+        |cfg| cfg.mqtt.clone(),
+        |cfg, mut new: MqttConfig| {
+            if new.password.is_empty() { new.password = cfg.mqtt.password.clone(); }
+            if new.client_key_pem.is_empty() { new.client_key_pem = cfg.mqtt.client_key_pem.clone(); }
+            cfg.mqtt = new;
+        },
+    )?;
+    register_section(
+        server,
+        "/api/config/switches",
+        app.clone(), app.clone(), nvs.clone(),
+        |cfg| cfg.switches.clone(),
+        |cfg, new: SwitchesConfig| { cfg.switches = new; },
+    )?;
+    register_section(
+        server,
+        "/api/config/sensors",
+        app.clone(), app.clone(), nvs.clone(),
+        |cfg| cfg.sensors.clone(),
+        |cfg, new: SensorsConfig| { cfg.sensors = new; },
+    )?;
+    register_section(
+        server,
+        "/api/config/schedule",
+        app.clone(), app.clone(), nvs.clone(),
+        |cfg| cfg.schedule.clone(),
+        |cfg, new: Schedule| { cfg.schedule = new; },
+    )?;
+    register_section(
+        server,
+        "/api/config/https",
+        app.clone(), app.clone(), nvs.clone(),
+        |cfg| cfg.https.clone(),
+        |cfg, mut new: HttpsConfig| {
+            if new.key_pem.is_empty() { new.key_pem = cfg.https.key_pem.clone(); }
+            cfg.https = new;
+        },
+    )?;
+    register_section(
+        server,
+        "/api/config/wireguard",
+        app.clone(), app.clone(), nvs.clone(),
+        |cfg| cfg.wireguard.clone(),
+        |cfg, mut new: WireguardConfig| {
+            if new.private_key.is_empty() { new.private_key = cfg.wireguard.private_key.clone(); }
+            if new.peer_preshared_key.is_empty() {
+                new.peer_preshared_key = cfg.wireguard.peer_preshared_key.clone();
+            }
+            cfg.wireguard = new;
+        },
+    )?;
+    register_section(
+        server,
+        "/api/config/time",
+        app.clone(), app.clone(), nvs.clone(),
+        |cfg| TimeSection { timezone: cfg.timezone.clone(), sntp_servers: cfg.sntp_servers.clone() },
+        |cfg, new: TimeSection| {
+            cfg.timezone = new.timezone;
+            cfg.sntp_servers = new.sntp_servers;
+        },
+    )?;
+    register_section(
+        server,
+        "/api/config/auth",
+        app.clone(), app.clone(), nvs.clone(),
+        |_cfg| AuthSection { admin_token: String::new() }, // GET always returns redacted
+        |cfg, new: AuthSection| {
+            // Empty incoming token preserves the stored one (consistent
+            // with redact-on-GET → empty-on-PUT semantics).
+            if !new.admin_token.is_empty() {
+                cfg.admin_token = new.admin_token;
+            }
+        },
+    )?;
 
     {
         let app = app.clone();
@@ -476,6 +614,80 @@ fn register_handlers(
         })?;
     }
 
+    Ok(())
+}
+
+/// Register a `GET /api/config/<path>` and `PUT /api/config/<path>` pair
+/// for a single config section. The section type `T` must be `Serialize +
+/// DeserializeOwned`; `get` extracts the section from the live (redacted)
+/// config for the response, `apply` merges incoming → current Config
+/// (most callers preserve secret fields that came back empty).
+fn register_section<T, G, A>(
+    server: &mut EspHttpServer<'static>,
+    path: &'static str,
+    app_get: App,
+    app_put: App,
+    nvs: Arc<dyn NvsStore>,
+    get: G,
+    apply: A,
+) -> Result<()>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + 'static,
+    G: Fn(&Config) -> T + Send + 'static,
+    A: Fn(&mut Config, T) + Send + 'static,
+{
+    server.fn_handler::<EspIOError, _>(path, Method::Get, move |req| {
+        let cfg = app_get.config().redact_secrets_for_api();
+        let body = serde_json::to_vec(&get(&cfg)).unwrap_or_default();
+        let mut resp = req.into_response(200, None, JSON_CT)?;
+        resp.write_all(&body)?;
+        Ok(())
+    })?;
+    server.fn_handler::<EspIOError, _>(path, Method::Put, move |mut req| {
+        if require_auth(&req, &app_put).is_err() {
+            return write_unauthorized(req);
+        }
+        let mut buf = Vec::with_capacity(256);
+        let mut chunk = [0u8; READ_BUF_LEN];
+        loop {
+            let n = req.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.len() > MAX_BODY {
+                let body = serde_json::to_vec(&ApiError::new("body too large"))
+                    .unwrap_or_default();
+                let mut resp = req.into_response(413, None, JSON_CT)?;
+                resp.write_all(&body)?;
+                return Ok(());
+            }
+        }
+        let section: T = match serde_json::from_slice(&buf) {
+            Ok(v) => v,
+            Err(e) => {
+                let body = serde_json::to_vec(&ApiError::new(format!("invalid json: {e}")))
+                    .unwrap_or_default();
+                let mut resp = req.into_response(400, None, JSON_CT)?;
+                resp.write_all(&body)?;
+                return Ok(());
+            }
+        };
+        let mut cfg = app_put.config();
+        apply(&mut cfg, section);
+        if let Err(e) = cfg.save(&*nvs) {
+            log::error!("config[{path}]: NVS save failed: {e}");
+            let body = serde_json::to_vec(&ApiError::new(format!("nvs save: {e}")))
+                .unwrap_or_default();
+            let mut resp = req.into_response(500, None, JSON_CT)?;
+            resp.write_all(&body)?;
+            return Ok(());
+        }
+        log::info!("config[{path}]: saved ({} bytes)", buf.len());
+        app_put.replace_config(cfg);
+        let _ = req.into_response(204, None, &[])?;
+        Ok(())
+    })?;
     Ok(())
 }
 

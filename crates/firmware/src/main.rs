@@ -211,6 +211,10 @@ fn main() -> Result<()> {
         eth
     };
 
+    // mdns: skipped under qemu because the component's linked-in init code
+    // null-derefs early in ESP-IDF startup there (PC=0 right after
+    // spi_flash init). Real hardware works.
+    #[cfg(not(feature = "qemu"))]
     if let Err(e) = mdns_init::start(&config.wifi.hostname) {
         warn!("mdns init failed: {e:?}");
     }
@@ -224,10 +228,9 @@ fn main() -> Result<()> {
         &config.https.key_pem,
     )?;
 
-    // Periodic config persistence: save the in-memory config back to NVS once
-    // a minute. This catches edits made via PUT /api/config without forcing
-    // every request to do an NVS write inline.
-    spawn_config_persist(app.clone(), nvs_store.clone());
+    // Config persistence used to be a periodic polling task; PUT /api/config
+    // now saves inline (and tls_certgen / valve-state already do), so there
+    // are no remaining sites that bypass NVS. One pthread stack reclaimed.
 
     // Schedule executor: once-per-minute evaluator.
     spawn_schedule_task(app.clone(), clock.clone());
@@ -447,24 +450,6 @@ fn spawn_wifi_state_mirror(
         *captive_redirect.lock().unwrap() = new_redirect;
         app.update_state(|s| s.network.wifi = Some(st.clone()));
         std::thread::sleep(Duration::from_secs(2));
-    });
-}
-
-fn spawn_config_persist(app: App, nvs: Arc<dyn NvsStore>) {
-    task_util::spawn_named(c"cfg-persist", 8 * 1024, move || {
-        let mut last_saved_json = serde_json::to_vec(&app.config()).unwrap_or_default();
-        loop {
-            std::thread::sleep(Duration::from_secs(60));
-            let cfg_json = serde_json::to_vec(&app.config()).unwrap_or_default();
-            if cfg_json != last_saved_json {
-                if let Err(e) = app.config().save(&*nvs) {
-                    warn!("nvs save failed: {e:?}");
-                } else {
-                    info!("config persisted to NVS ({} bytes)", cfg_json.len());
-                    last_saved_json = cfg_json;
-                }
-            }
-        }
     });
 }
 

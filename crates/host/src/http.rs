@@ -12,7 +12,23 @@ use axum::{
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use watercontroller_core::api::{routes, ConfigUpdate, SwitchCommand};
+use watercontroller_core::config::{
+    HttpsConfig, MqttConfig, SensorsConfig, SwitchesConfig, WifiConfig, WireguardConfig,
+};
 use watercontroller_core::log_buffer::LogRecord;
+use watercontroller_core::schedule::Schedule;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+struct TimeSection {
+    timezone: String,
+    sntp_servers: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AuthSection {
+    admin_token: String,
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -25,6 +41,19 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(index))
         .route(routes::STATUS, get(get_status))
         .route(routes::CONFIG, get(get_config).put(put_config))
+        // Per-section endpoints — see firmware/src/http_server.rs for the
+        // production implementation. The host mirrors them so Playwright
+        // tests exercise the same surface as a real browser would on the
+        // device.
+        .route("/api/config/wifi",      get(get_wifi).put(put_wifi))
+        .route("/api/config/mqtt",      get(get_mqtt).put(put_mqtt))
+        .route("/api/config/switches",  get(get_switches).put(put_switches))
+        .route("/api/config/sensors",   get(get_sensors).put(put_sensors))
+        .route("/api/config/schedule",  get(get_schedule).put(put_schedule))
+        .route("/api/config/https",     get(get_https).put(put_https))
+        .route("/api/config/wireguard", get(get_wg).put(put_wg))
+        .route("/api/config/time",      get(get_time).put(put_time))
+        .route("/api/config/auth",      get(get_auth).put(put_auth))
         .route(routes::SWITCH, post(post_switch))
         .route(routes::LOGS_WS, get(ws_logs))
         .route(routes::FACTORY_RESET, post(post_factory_reset))
@@ -75,6 +104,117 @@ async fn post_switch(
         watercontroller_core::api::CommandOutcome::Busy { .. } => StatusCode::CONFLICT,
     };
     (status, Json(outcome))
+}
+
+// Per-section config handlers. Same redact-on-GET / merge-on-empty
+// semantics as the firmware side.
+async fn get_wifi(State(s): State<Arc<AppState>>) -> Json<WifiConfig> {
+    Json(s.app.config().redact_secrets_for_api().wifi)
+}
+async fn put_wifi(State(s): State<Arc<AppState>>, Json(mut new): Json<WifiConfig>) -> impl IntoResponse {
+    let mut cfg = s.app.config();
+    for net in new.networks.iter_mut() {
+        if net.password.is_empty() {
+            if let Some(o) = cfg.wifi.networks.iter().find(|n| n.ssid == net.ssid) {
+                net.password = o.password.clone();
+            }
+        }
+    }
+    cfg.wifi = new;
+    s.app.replace_config(cfg);
+    StatusCode::NO_CONTENT
+}
+
+async fn get_mqtt(State(s): State<Arc<AppState>>) -> Json<MqttConfig> {
+    Json(s.app.config().redact_secrets_for_api().mqtt)
+}
+async fn put_mqtt(State(s): State<Arc<AppState>>, Json(mut new): Json<MqttConfig>) -> impl IntoResponse {
+    let mut cfg = s.app.config();
+    if new.password.is_empty() { new.password = cfg.mqtt.password.clone(); }
+    if new.client_key_pem.is_empty() { new.client_key_pem = cfg.mqtt.client_key_pem.clone(); }
+    cfg.mqtt = new;
+    s.app.replace_config(cfg);
+    StatusCode::NO_CONTENT
+}
+
+async fn get_switches(State(s): State<Arc<AppState>>) -> Json<SwitchesConfig> {
+    Json(s.app.config().switches)
+}
+async fn put_switches(State(s): State<Arc<AppState>>, Json(new): Json<SwitchesConfig>) -> impl IntoResponse {
+    let mut cfg = s.app.config();
+    cfg.switches = new;
+    s.app.replace_config(cfg);
+    StatusCode::NO_CONTENT
+}
+
+async fn get_sensors(State(s): State<Arc<AppState>>) -> Json<SensorsConfig> {
+    Json(s.app.config().sensors)
+}
+async fn put_sensors(State(s): State<Arc<AppState>>, Json(new): Json<SensorsConfig>) -> impl IntoResponse {
+    let mut cfg = s.app.config();
+    cfg.sensors = new;
+    s.app.replace_config(cfg);
+    StatusCode::NO_CONTENT
+}
+
+async fn get_schedule(State(s): State<Arc<AppState>>) -> Json<Schedule> {
+    Json(s.app.config().schedule)
+}
+async fn put_schedule(State(s): State<Arc<AppState>>, Json(new): Json<Schedule>) -> impl IntoResponse {
+    let mut cfg = s.app.config();
+    cfg.schedule = new;
+    s.app.replace_config(cfg);
+    StatusCode::NO_CONTENT
+}
+
+async fn get_https(State(s): State<Arc<AppState>>) -> Json<HttpsConfig> {
+    Json(s.app.config().redact_secrets_for_api().https)
+}
+async fn put_https(State(s): State<Arc<AppState>>, Json(mut new): Json<HttpsConfig>) -> impl IntoResponse {
+    let mut cfg = s.app.config();
+    if new.key_pem.is_empty() { new.key_pem = cfg.https.key_pem.clone(); }
+    cfg.https = new;
+    s.app.replace_config(cfg);
+    StatusCode::NO_CONTENT
+}
+
+async fn get_wg(State(s): State<Arc<AppState>>) -> Json<WireguardConfig> {
+    Json(s.app.config().redact_secrets_for_api().wireguard)
+}
+async fn put_wg(State(s): State<Arc<AppState>>, Json(mut new): Json<WireguardConfig>) -> impl IntoResponse {
+    let mut cfg = s.app.config();
+    if new.private_key.is_empty() { new.private_key = cfg.wireguard.private_key.clone(); }
+    if new.peer_preshared_key.is_empty() {
+        new.peer_preshared_key = cfg.wireguard.peer_preshared_key.clone();
+    }
+    cfg.wireguard = new;
+    s.app.replace_config(cfg);
+    StatusCode::NO_CONTENT
+}
+
+async fn get_time(State(s): State<Arc<AppState>>) -> Json<TimeSection> {
+    let cfg = s.app.config();
+    Json(TimeSection { timezone: cfg.timezone, sntp_servers: cfg.sntp_servers })
+}
+async fn put_time(State(s): State<Arc<AppState>>, Json(new): Json<TimeSection>) -> impl IntoResponse {
+    let mut cfg = s.app.config();
+    cfg.timezone = new.timezone;
+    cfg.sntp_servers = new.sntp_servers;
+    s.app.replace_config(cfg);
+    StatusCode::NO_CONTENT
+}
+
+async fn get_auth(State(_s): State<Arc<AppState>>) -> Json<AuthSection> {
+    // Always redacted on GET.
+    Json(AuthSection { admin_token: String::new() })
+}
+async fn put_auth(State(s): State<Arc<AppState>>, Json(new): Json<AuthSection>) -> impl IntoResponse {
+    let mut cfg = s.app.config();
+    if !new.admin_token.is_empty() {
+        cfg.admin_token = new.admin_token;
+    }
+    s.app.replace_config(cfg);
+    StatusCode::NO_CONTENT
 }
 
 async fn ws_logs(State(s): State<Arc<AppState>>, ws: WebSocketUpgrade) -> Response {

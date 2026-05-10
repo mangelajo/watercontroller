@@ -72,6 +72,9 @@ CONFIG_LWIP_MAX_SOCKETS=16
 # connection, which we've now got room for.
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 
+# Note: max_uri_handlers is a RUNTIME parameter on httpd_config_t, not a
+# Kconfig — set it on the Configuration struct in src/http_server.rs.
+
 # mbedTLS memory tuning. Defaults are sized for an STA32 with 320 KB SRAM;
 # on this device with two HTTPD servers running we have ~20 KB free heap at
 # steady state and `mbedtls_ssl_setup` was returning ALLOC_FAILED on every
