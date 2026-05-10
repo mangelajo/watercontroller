@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>doremorwater</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --panel-2: #1f2630;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #7d8590;
+    --accent: #58a6ff;
+    --good: #3fb950;
+    --warn: #d29922;
+    --bad:  #f85149;
+    --busy: #a371f7;
+    --shadow: 0 1px 0 rgba(255,255,255,0.04), 0 8px 24px rgba(0,0,0,0.35);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 22px; border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, var(--panel) 0%, var(--bg) 100%);
+  }
+  header .title { font-weight: 600; font-size: 16px; letter-spacing: 0.2px; }
+  header .title small { color: var(--muted); font-weight: 400; margin-left: 8px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 999px; background: var(--panel-2);
+    border: 1px solid var(--border); font-size: 12px; color: var(--muted);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.good { background: var(--good); box-shadow: 0 0 8px var(--good); }
+  .dot.bad  { background: var(--bad);  box-shadow: 0 0 8px var(--bad);  }
+  .dot.warn { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+
+  main {
+    max-width: 980px; margin: 0 auto; padding: 22px;
+    display: grid; gap: 18px;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px; box-shadow: var(--shadow);
+  }
+  .card h2 {
+    margin: 0 0 12px; font-size: 13px; font-weight: 600;
+    color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px;
+  }
+  .full { grid-column: 1 / -1; }
+
+  .metric {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding: 10px 0; border-top: 1px solid var(--border);
+  }
+  .metric:first-of-type { border-top: 0; padding-top: 0; }
+  .metric .label { color: var(--muted); }
+  .metric .value { font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 600; }
+  .metric .unit { color: var(--muted); margin-left: 4px; font-size: 12px; }
+
+  .switches { display: grid; gap: 10px; }
+  .switch-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px; background: var(--panel-2); border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .switch-row .name { font-weight: 500; }
+  .switch-row .sub  { color: var(--muted); font-size: 12px; }
+
+  /* macOS-style toggle */
+  .toggle {
+    position: relative; width: 46px; height: 26px;
+    background: #30363d; border-radius: 13px; cursor: pointer;
+    transition: background .18s ease;
+    flex-shrink: 0;
+  }
+  .toggle::after {
+    content: ""; position: absolute; top: 3px; left: 3px;
+    width: 20px; height: 20px; border-radius: 50%;
+    background: #f0f6fc; transition: left .18s ease;
+    box-shadow: 0 1px 3px rgba(0,0,0,.4);
+  }
+  .toggle.on  { background: var(--good); }
+  .toggle.on::after { left: 23px; }
+  .toggle.busy { background: var(--busy); cursor: progress; }
+  .toggle.busy::after { left: 13px; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(0.85); }
+  }
+
+  pre.logs {
+    background: #0a0d12; border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; height: 320px; overflow-y: auto; margin: 0;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: #c9d1d9;
+  }
+  pre.logs .err { color: var(--bad); }
+  pre.logs .warn { color: var(--warn); }
+  pre.logs .info { color: var(--text); }
+  pre.logs .debug { color: var(--muted); }
+
+  footer {
+    text-align: center; color: var(--muted);
+    padding: 18px; font-size: 12px;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <div class="title">doremorwater <small id="version">—</small></div>
+    <div class="pill"><span class="dot" id="conn-dot"></span><span id="conn-text">connecting…</span></div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Sensors</h2>
+      <div class="metric"><span class="label">Battery</span><span><span class="value" id="m-battery">—</span><span class="unit">V</span></span></div>
+      <div class="metric"><span class="label">Pressure</span><span><span class="value" id="m-pressure">—</span><span class="unit">bar</span></span></div>
+      <div class="metric"><span class="label">Flow</span><span><span class="value" id="m-flow">—</span><span class="unit">L/h</span></span></div>
+      <div class="metric"><span class="label">Total water</span><span><span class="value" id="m-total">—</span><span class="unit">L</span></span></div>
+    </section>
+
+    <section class="card">
+      <h2>Switches</h2>
+      <div class="switches">
+        <div class="switch-row" data-key="water_control">
+          <div><div class="name">Water control</div><div class="sub" id="wc-sub">main valve + drain</div></div>
+          <div class="toggle" id="t-wc"></div>
+        </div>
+        <div class="switch-row" data-key="sprinkler_1">
+          <div><div class="name">Riego exterior</div><div class="sub">7 min auto-off</div></div>
+          <div class="toggle" id="t-s1"></div>
+        </div>
+        <div class="switch-row" data-key="sprinkler_2">
+          <div><div class="name">Riego mobil</div><div class="sub">5 min auto-off</div></div>
+          <div class="toggle" id="t-s2"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card full">
+      <h2>Logs</h2>
+      <pre class="logs" id="logs"></pre>
+    </section>
+  </main>
+
+  <footer>doremorwater · <span id="uptime">—</span></footer>
+
+<script>
+  const $ = s => document.querySelector(s);
+
+  function fmt(v, digits=2) {
+    if (v === null || v === undefined) return "—";
+    return Number(v).toFixed(digits);
+  }
+  function fmtUptime(ms) {
+    if (ms == null) return "—";
+    const s = Math.floor(ms / 1000);
+    const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60), ss = s % 60;
+    if (d) return `${d}d ${h}h ${m}m`;
+    if (h) return `${h}h ${m}m ${ss}s`;
+    if (m) return `${m}m ${ss}s`;
+    return `${ss}s`;
+  }
+  function setToggle(el, state) {
+    el.classList.remove("on", "busy");
+    if (state === "on") el.classList.add("on");
+    else if (state === "transitioning") el.classList.add("busy");
+  }
+  function setConn(state, label) {
+    const dot = $("#conn-dot"), txt = $("#conn-text");
+    dot.classList.remove("good", "warn", "bad");
+    if (state) dot.classList.add(state);
+    txt.textContent = label;
+  }
+
+  async function refreshStatus() {
+    try {
+      const r = await fetch("/api/status");
+      if (!r.ok) throw new Error(r.status);
+      const s = await r.json();
+      const sens = s.sensors || {};
+      $("#m-battery").textContent  = fmt(sens.battery_v, 2);
+      $("#m-pressure").textContent = fmt(sens.pressure_bar, 2);
+      $("#m-flow").textContent     = fmt(sens.flow_lph, 1);
+      $("#m-total").textContent    = fmt(sens.total_l, 3);
+
+      const sw = s.switches || {};
+      setToggle($("#t-s1"), sw.sprinkler_1 ? "on" : "off");
+      setToggle($("#t-s2"), sw.sprinkler_2 ? "on" : "off");
+      const wc = sw.water_control;
+      setToggle($("#t-wc"), wc === "On" ? "on" : (wc === "Transitioning" ? "transitioning" : "off"));
+
+      $("#version").textContent = "v" + (s.firmware_version || "?");
+      $("#uptime").textContent  = "uptime " + fmtUptime(s.uptime_ms);
+
+      const wifi = s.network && s.network.wifi;
+      if (wifi && wifi.kind === "connected") setConn("good", `wifi: ${wifi.ssid} (${wifi.ip})`);
+      else if (wifi && wifi.kind === "ap_mode") setConn("warn", `AP mode: ${wifi.ssid}`);
+      else if (wifi && wifi.kind === "connecting") setConn("warn", `connecting to ${wifi.ssid}`);
+      else setConn("bad", "offline");
+    } catch (e) {
+      setConn("bad", "no response");
+    }
+  }
+
+  function bindToggle(elId, key) {
+    $(elId).addEventListener("click", async () => {
+      const isOn = $(elId).classList.contains("on");
+      const cmd = key === "water_control"
+        ? { kind: "water_control", on: !isOn }
+        : (key === "sprinkler_1"
+            ? { kind: "sprinkler1", on: !isOn }
+            : { kind: "sprinkler2", on: !isOn });
+      try {
+        const r = await fetch("/api/switch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(cmd),
+        });
+        if (r.status === 409) console.warn("busy");
+        await refreshStatus();
+      } catch (e) {
+        console.error(e);
+      }
+    });
+  }
+  bindToggle("#t-s1", "sprinkler_1");
+  bindToggle("#t-s2", "sprinkler_2");
+  bindToggle("#t-wc", "water_control");
+
+  // Live logs over WebSocket.
+  function connectLogs() {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(proto + "//" + location.host + "/ws/logs");
+    const pre = $("#logs");
+    ws.onmessage = (ev) => {
+      const line = document.createElement("div");
+      const cls = /ERROR/.test(ev.data) ? "err"
+                : /WARN/.test(ev.data)  ? "warn"
+                : /DEBUG/.test(ev.data) ? "debug" : "info";
+      line.className = cls;
+      line.textContent = ev.data;
+      pre.appendChild(line);
+      while (pre.childElementCount > 500) pre.removeChild(pre.firstChild);
+      pre.scrollTop = pre.scrollHeight;
+    };
+    ws.onclose = () => setTimeout(connectLogs, 2000);
+  }
+  connectLogs();
+
+  refreshStatus();
+  setInterval(refreshStatus, 2000);
+</script>
+</body>
+</html>

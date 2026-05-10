@@ -1,0 +1,262 @@
+esphome:
+  name: doremorwater
+  friendly_name: doremorwater
+  platformio_options:
+    board_build.f_cpu: 80000000L
+
+esp32:
+  board: esp32dev
+  framework:
+  #  type: arduino
+    type: esp-idf
+    version: recommended
+    # Custom sdkconfig options
+    sdkconfig_options:
+      COMPILER_OPTIMIZATION_SIZE: y
+
+  
+# Example configuration entry
+debug:
+  update_interval: 15min
+
+web_server:
+  local: true
+  ota: False
+
+
+text_sensor:
+  - platform: debug
+    device:
+      name: "Device Info"
+      internal: True
+    reset_reason:
+      name: "Reset Reason"
+
+    
+
+    
+
+# Enable logging
+logger:
+  level: VERBOSE
+  #logs:
+  #  wireguard.component: VERBOSE
+
+
+sensor:
+  - platform: adc
+    pin: GPIO36
+    attenuation: 11dB
+    name: "Battery Level"
+    update_interval: 10min
+    raw: True
+    filters:
+      - calibrate_linear:
+          datapoints:
+            - 1130 -> 5.00
+            - 2931 -> 12.2
+      - sliding_window_moving_average:
+          window_size: 15
+          send_every: 2
+  
+  - platform: adc
+    pin: GPIO32
+    attenuation: 11dB
+    name: "Pressure"
+    device_class: pressure
+    update_interval: 1min
+    filters:
+    - calibrate_linear:
+        datapoints:
+          - 0.37 -> 0.54
+          - 2.62 -> 3.98
+    - calibrate_linear:
+         datapoints:
+           - 0.54 -> 0.0
+           - 4.50 -> 10.34214
+    unit_of_measurement: "bar"
+
+  - platform: pulse_counter
+    pin: GPIO33
+    name: "Water flow"
+    update_interval: 1min
+    device_class: water
+    icon: "mdi:water"
+    filters:
+    - lambda: return (x * 0.00225012)*60.0;
+    unit_of_measurement: "L/hr"  
+    total:
+      name: "Total water"
+      device_class: water
+      state_class: total_increasing
+      accuracy_decimals: 3
+      icon: "mdi:water"
+      unit_of_measurement: "L"
+      filters:
+        - lambda: return (x / 516.5);
+
+  - platform: debug
+    loop_time:
+      name: "Loop Time"
+
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/Madrid
+    servers:
+      - 0.es.pool.ntp.org
+      - 1.es.pool.ntp.org
+      - 2.es.pool.ntp.org
+
+#    on_time:
+#      - automation_id: riego_exterior
+#        seconds: 0
+#        minutes: 0
+#        hours:
+#          - 10
+#          - 22
+#        then:
+#          - switch.turn_on: sprinkler_1
+#      - automation_id: riego_interior
+#        seconds: 0
+#        minutes: 30
+#        hours:
+#          - 10
+#          - 22
+#        then:
+#          - switch.turn_on: sprinkler_2
+
+switch:
+  - platform: gpio
+    name: "Riego exterior 20min"
+    id: sprinkler_1
+    pin: GPIO12
+    on_turn_on:
+      - delay: 7min
+      - switch.turn_off: sprinkler_1
+      
+
+  - platform: gpio
+    name: "Riego mobil 10min"
+    id: sprinkler_2
+    pin: GPIO4
+    on_turn_on:
+      - delay: 5min
+      - switch.turn_off: sprinkler_2
+
+  - platform: gpio
+    name: "Open water"
+    id: open_water
+    internal: True
+    pin: GPIO26
+    on_turn_on:
+      - delay: 14s
+      - switch.turn_off: open_water
+  
+  - platform: gpio
+    name: "Close water"
+    id: close_water
+    internal: True
+    pin: GPIO27
+    on_turn_on:
+      - delay: 14s
+      - switch.turn_off: close_water
+
+  - platform: gpio
+    name: "Drain valve"
+    id: drain_valve
+    pin: GPIO25
+    internal: True
+    on_turn_on:
+      - delay: 5min
+      - switch.turn_off: drain_valve
+    
+  - platform: gpio
+    id: led1
+    pin: GPIO13
+  - platform: gpio
+    id: led2
+    pin: GPIO14
+
+
+### Switch virtual agua
+  - platform: template
+    name: "Water control"
+    id: water
+    optimistic: True
+    restore_mode: RESTORE_DEFAULT_OFF
+    
+    turn_on_action:
+      #- globals.set:
+      #    id: water_control_state
+      #    value: "false"
+      - switch.turn_off: drain_valve
+      - switch.turn_off: close_water
+      - delay: 1s
+      - switch.turn_on: open_water
+      - delay: 15s
+      - switch.template.publish:
+          id: water
+          state: ON
+  
+    turn_off_action:
+      #- globals.set:
+      #    id: water_control_state
+      #    value: "true"
+      - switch.turn_off: open_water
+      - delay: 1s
+      - switch.turn_on: close_water
+      - delay: 15s
+      - switch.turn_on: drain_valve
+      - switch.template.publish:
+          id: water
+          state: OFF
+
+
+
+
+#wireguard:
+#  address: 10.6.0.5
+#  private_key: !secret doremorwater_wg_pk
+#  peer_endpoint: out.ajo.es
+#  peer_public_key: TEi/NY4NtR/KNt9UmqfVsWohVzDatEfSEqhas90WBjg=
+#  peer_preshared_key: !secret doremorwater_wg_psk
+#
+#  # Optional list of ip/mask (any host is allowed if omitted)
+#  peer_allowed_ips:
+#    - 192.168.1.0/24
+#    - 10.6.0.1/32
+#  
+#  # Optional keepalive (disabled by default)
+#  peer_persistent_keepalive: 25s
+#
+#  reboot_timeout: 5min
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "xxxxx"
+
+ota:
+  password: "xxxxxx"
+  platform: esphome
+
+wifi:
+  networks:
+    - ssid: lainternetmovil2EXT
+      password: !secret wifi_doremor_password
+    - ssid: lainternetmovil2
+      password: !secret wifi_doremor_password
+
+ # use_address: 10.6.0.5 # from wireguard connection
+  use_address: 192.168.2.107
+      
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Doremorwater Fallback Hotspot"
+    password: ""
+
+captive_portal:
+
+    

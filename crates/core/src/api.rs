@@ -1,0 +1,59 @@
+//! HTTP API types + pure-function handlers shared between firmware and host
+//! HTTP servers. Each server adapter (`firmware::http_server` and
+//! `host::http_server`) is responsible only for protocol plumbing — request
+//! parsing, response writing — and routes everything through these handlers.
+
+use crate::config::Config;
+use crate::state::DeviceSnapshot;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum SwitchCommand {
+    Sprinkler1 { on: bool },
+    Sprinkler2 { on: bool },
+    WaterControl { on: bool },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ApiError {
+    pub message: String,
+}
+
+impl ApiError {
+    pub fn new<S: Into<String>>(s: S) -> Self {
+        Self { message: s.into() }
+    }
+}
+
+/// Outcome of a switch command. Servers should return 200 + JSON for `Ok`
+/// and 409 + JSON for `Busy` (water control mid-sequence).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case", tag = "result")]
+pub enum CommandOutcome {
+    Ok,
+    Busy { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StatusResponse<'a> {
+    pub state: &'a DeviceSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigResponse<'a> {
+    pub config: &'a Config,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfigUpdate(pub Config);
+
+/// Routes for the HTTP API. The firmware/host adapters dispatch on (method, path)
+/// and call into application code.
+pub mod routes {
+    pub const STATUS: &str = "/api/status";
+    pub const CONFIG: &str = "/api/config";
+    pub const SWITCH: &str = "/api/switch";
+    pub const LOGS_WS: &str = "/ws/logs";
+    pub const OTA_UPLOAD: &str = "/api/ota";
+}

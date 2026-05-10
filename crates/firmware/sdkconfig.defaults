@@ -1,0 +1,27 @@
+# Match the ESPHome reference: 80 MHz CPU, size-optimized.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# Logging — keep verbose available; runtime level is set in code.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_DEFAULT_LEVEL=3
+CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y
+CONFIG_LOG_MAXIMUM_LEVEL=5
+
+# Watchdog: be lenient during early bring-up; tighten later.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+
+# Custom partition table for OTA + NVS + SPA assets.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# OTA — enable rollback on boot failure.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# WiFi — use ESP-IDF defaults; we'll tune buffer sizes later if needed.
+CONFIG_ESP_WIFI_ENABLED=y
+
+# FreeRTOS tick rate — 1ms ticks for finer timing in valve sequencer.
+CONFIG_FREERTOS_HZ=1000

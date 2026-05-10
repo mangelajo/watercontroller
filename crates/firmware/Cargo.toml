@@ -1,0 +1,39 @@
+[package]
+name = "watercontroller-firmware"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ESP32 firmware binary for the doremorwater controller"
+resolver = "2"
+
+[[bin]]
+name = "watercontroller-firmware"
+path = "src/main.rs"
+test = false
+harness = false
+
+[dependencies]
+watercontroller-core = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+esp-idf-svc = { version = "0.51", default-features = false }
+esp-idf-hal = { version = "0.45", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["alloc", "std", "serde"] }
+anyhow = "1"
+heapless = "0.8"
+
+[build-dependencies]
+embuild = { version = "0.33", features = ["espidf"] }
+
+[features]
+default = ["std", "esp-idf-svc/native"]
+pio = ["esp-idf-svc/pio"]
+std = ["esp-idf-svc/binstart", "esp-idf-svc/std"]
+alloc = ["esp-idf-svc/alloc"]
+nightly = ["esp-idf-svc/nightly"]
+experimental = ["esp-idf-svc/experimental"]
+
+[package.metadata.esp-idf-sys]
+esp_idf_version = "v5.3.3"
+esp_idf_components = []

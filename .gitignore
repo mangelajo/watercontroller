@@ -1,0 +1,14 @@
+target/
+**/target/
+.embuild/
+managed_components/
+build/
+.idf-component-cache/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store

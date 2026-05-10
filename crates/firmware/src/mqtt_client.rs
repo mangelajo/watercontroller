@@ -1,0 +1,122 @@
+//! `Mqtt` trait implementation backed by ESP-IDF's MQTT client.
+//!
+//! The client owns the connection lifecycle internally (auto-reconnect with
+//! backoff on disconnect). Incoming messages are dispatched to a handler
+//! installed via `set_handler`. Publish + subscribe are non-blocking enqueues.
+//!
+//! TLS is configured implicitly when the broker URL uses `mqtts://` (the
+//! ESP-IDF client uses the already-linked mbedTLS).
+
+use anyhow::Result;
+use esp_idf_svc::mqtt::client::{
+    EspMqttClient, EspMqttEvent, EventPayload, MqttClientConfiguration, QoS,
+};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use watercontroller_core::traits::{Mqtt, PublishOpts};
+
+type Handler = Box<dyn Fn(&str, &[u8]) + Send + Sync>;
+
+pub struct EspMqtt {
+    inner: Mutex<Option<EspMqttClient<'static>>>,
+    handler: Arc<Mutex<Option<Handler>>>,
+    connected: Arc<Mutex<bool>>,
+}
+
+impl EspMqtt {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(None),
+            handler: Arc::new(Mutex::new(None)),
+            connected: Arc::new(Mutex::new(false)),
+        }
+    }
+
+    /// (Re)connect to the configured broker. Safe to call multiple times —
+    /// previous client is dropped first.
+    pub fn connect(
+        &self,
+        url: &str,
+        username: Option<&str>,
+        password: Option<&str>,
+        client_id: &str,
+    ) -> Result<()> {
+        let cfg = MqttClientConfiguration {
+            client_id: Some(client_id),
+            username,
+            password,
+            keep_alive_interval: Some(Duration::from_secs(30)),
+            ..Default::default()
+        };
+        let handler = self.handler.clone();
+        let connected = self.connected.clone();
+        let client = EspMqttClient::new_cb(url, &cfg, move |evt: EspMqttEvent| {
+            on_event(&handler, &connected, evt)
+        })?;
+        *self.inner.lock().unwrap() = Some(client);
+        Ok(())
+    }
+}
+
+impl Default for EspMqtt {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn on_event(
+    handler: &Arc<Mutex<Option<Handler>>>,
+    connected: &Arc<Mutex<bool>>,
+    event: EspMqttEvent,
+) {
+    match event.payload() {
+        EventPayload::Connected(_) => {
+            *connected.lock().unwrap() = true;
+            log::info!("mqtt: connected");
+        }
+        EventPayload::Disconnected => {
+            *connected.lock().unwrap() = false;
+            log::warn!("mqtt: disconnected");
+        }
+        EventPayload::Received { topic, data, .. } => {
+            if let Some(h) = handler.lock().unwrap().as_ref() {
+                if let Some(t) = topic {
+                    h(t, data);
+                }
+            }
+        }
+        EventPayload::Error(e) => log::warn!("mqtt error: {e:?}"),
+        _ => {}
+    }
+}
+
+impl Mqtt for EspMqtt {
+    fn publish(&self, topic: &str, payload: &[u8], opts: PublishOpts) {
+        if let Some(c) = self.inner.lock().unwrap().as_mut() {
+            let qos = match opts.qos {
+                0 => QoS::AtMostOnce,
+                2 => QoS::ExactlyOnce,
+                _ => QoS::AtLeastOnce,
+            };
+            if let Err(e) = c.enqueue(topic, qos, opts.retained, payload) {
+                log::warn!("mqtt enqueue {topic} failed: {e:?}");
+            }
+        }
+    }
+
+    fn subscribe(&self, topic: &str) {
+        if let Some(c) = self.inner.lock().unwrap().as_mut() {
+            if let Err(e) = c.subscribe(topic, QoS::AtLeastOnce) {
+                log::warn!("mqtt subscribe {topic} failed: {e:?}");
+            }
+        }
+    }
+
+    fn set_handler(&self, h: Handler) {
+        *self.handler.lock().unwrap() = Some(h);
+    }
+
+    fn is_connected(&self) -> bool {
+        *self.connected.lock().unwrap()
+    }
+}
