@@ -155,6 +155,11 @@
   <nav class="tabs">
     <button data-tab="dashboard" class="active">Dashboard</button>
     <button data-tab="settings">Settings</button>
+    <span style="margin-left: auto; padding: 12px 16px; display: flex; gap: 6px; align-items: center;">
+      <label for="admin-token" class="status-msg">Admin token:</label>
+      <input id="admin-token" type="password" placeholder="(unset)" autocomplete="off"
+             style="background:#0a0d12;border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;width:140px;font:inherit;">
+    </span>
   </nav>
 
   <main id="dashboard" class="tab active">
@@ -231,6 +236,18 @@
 <script>
   const $ = s => document.querySelector(s);
 
+  // Admin token: stored in localStorage so reloads remember it. Sent as
+  // Authorization: Bearer ... on all POST/PUT requests when non-empty.
+  const TOKEN_KEY = "wc_admin_token";
+  $("#admin-token").value = localStorage.getItem(TOKEN_KEY) || "";
+  $("#admin-token").addEventListener("change", e => {
+    localStorage.setItem(TOKEN_KEY, e.target.value);
+  });
+  function authHeaders() {
+    const t = $("#admin-token").value;
+    return t ? { "Authorization": "Bearer " + t } : {};
+  }
+
   function fmt(v, digits=2) {
     if (v === null || v === undefined) return "—";
     return Number(v).toFixed(digits);
@@ -298,10 +315,11 @@
       try {
         const r = await fetch("/api/switch", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...authHeaders() },
           body: JSON.stringify(cmd),
         });
-        if (r.status === 409) console.warn("busy");
+        if (r.status === 401) alert("admin token missing or wrong");
+        else if (r.status === 409) console.warn("busy");
         await refreshStatus();
       } catch (e) {
         console.error(e);
@@ -375,7 +393,7 @@
     try {
       const r = await fetch("/api/config", {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify(parsed),
       });
       if (!r.ok) throw new Error("HTTP " + r.status);
@@ -397,6 +415,8 @@
       const xhr = new XMLHttpRequest();
       xhr.open("POST", "/api/ota");
       xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      const auth = authHeaders().Authorization;
+      if (auth) xhr.setRequestHeader("Authorization", auth);
       xhr.upload.onprogress = (e) => { if (e.lengthComputable) prog.value = (e.loaded / e.total) * 100; };
       xhr.onload = () => {
         if (xhr.status === 202) {
@@ -418,7 +438,7 @@
     const msg = $("#reset-msg");
     msg.textContent = "requesting reset…"; msg.className = "status-msg";
     try {
-      const r = await fetch("/api/factory_reset", { method: "POST" });
+      const r = await fetch("/api/factory_reset", { method: "POST", headers: authHeaders() });
       if (r.status === 202) { msg.textContent = "reset accepted; device rebooting"; msg.className = "status-msg ok"; }
       else if (r.status === 501) { msg.textContent = "factory reset is firmware-only (host build)"; msg.className = "status-msg"; }
       else { msg.textContent = "unexpected " + r.status; msg.className = "status-msg err"; }

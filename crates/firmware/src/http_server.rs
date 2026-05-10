@@ -22,6 +22,38 @@ use watercontroller_core::traits::NvsStore;
 const READ_BUF_LEN: usize = 1024;
 const MAX_BODY: usize = 32 * 1024;
 
+/// If `app.config().admin_token` is non-empty, require an
+/// `Authorization: Bearer <token>` header. Returns `Ok(())` to proceed,
+/// or writes a 401 response and returns `Err(())` to short-circuit the
+/// caller.
+fn require_auth(
+    req: &esp_idf_svc::http::server::Request<&mut esp_idf_svc::http::server::EspHttpConnection<'_>>,
+    app: &App,
+) -> Result<(), ()> {
+    let cfg_token = app.config().admin_token;
+    if cfg_token.is_empty() {
+        return Ok(());
+    }
+    let header = req.header("Authorization").unwrap_or("");
+    if header.strip_prefix("Bearer ") == Some(&cfg_token) {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+fn write_unauthorized(
+    req: esp_idf_svc::http::server::Request<&mut esp_idf_svc::http::server::EspHttpConnection<'_>>,
+) -> Result<(), EspIOError> {
+    let body = serde_json::to_vec(&ApiError::new(
+        "missing or invalid Authorization: Bearer <admin_token>",
+    ))
+    .unwrap_or_default();
+    let mut resp = req.into_response(401, None, JSON_CT)?;
+    resp.write_all(&body)?;
+    Ok(())
+}
+
 const JSON_CT: &[(&str, &str)] = &[("Content-Type", "application/json")];
 const HTML_CT: &[(&str, &str)] = &[("Content-Type", "text/html; charset=utf-8")];
 
@@ -65,6 +97,9 @@ pub fn spawn(
     {
         let app = app.clone();
         server.fn_handler::<EspIOError, _>(routes::CONFIG, Method::Put, move |mut req| {
+            if require_auth(&req, &app).is_err() {
+                return write_unauthorized(req);
+            }
             let mut buf = Vec::with_capacity(256);
             let mut chunk = [0u8; READ_BUF_LEN];
             loop {
@@ -98,6 +133,9 @@ pub fn spawn(
     {
         let app = app.clone();
         server.fn_handler::<EspIOError, _>(routes::SWITCH, Method::Post, move |mut req| {
+            if require_auth(&req, &app).is_err() {
+                return write_unauthorized(req);
+            }
             let mut buf = Vec::with_capacity(128);
             let mut chunk = [0u8; READ_BUF_LEN];
             loop {
@@ -186,7 +224,11 @@ pub fn spawn(
 
     // POST /api/ota → stream firmware image into the inactive OTA partition.
     {
+        let app = app.clone();
         server.fn_handler::<EspIOError, _>(routes::OTA_UPLOAD, Method::Post, move |mut req| {
+            if require_auth(&req, &app).is_err() {
+                return write_unauthorized(req);
+            }
             log::info!("ota: upload starting");
             let mut total = 0usize;
             // Drive crate::net_ota::apply_image with a reader that pulls from
@@ -279,7 +321,11 @@ pub fn spawn(
     // POST /api/factory_reset → erase NVS config and reboot.
     {
         let nvs = nvs.clone();
+        let app = app.clone();
         server.fn_handler::<EspIOError, _>(routes::FACTORY_RESET, Method::Post, move |req| {
+            if require_auth(&req, &app).is_err() {
+                return write_unauthorized(req);
+            }
             log::warn!("factory reset requested via HTTP");
             if let Err(e) = Config::factory_reset(&*nvs) {
                 let body = serde_json::to_vec(&ApiError::new(format!("erase failed: {e}")))

@@ -134,6 +134,13 @@ pub struct Config {
     pub schedule: Schedule,
     #[serde(default)]
     pub wireguard: WireguardConfig,
+    /// If non-empty, every mutating HTTP request (POST/PUT) must carry an
+    /// `Authorization: Bearer <token>` header matching this value. Empty
+    /// (default) means the API is unauthenticated — fine for a freshly
+    /// flashed device behind a trusted network, but you should set this
+    /// before exposing the device to anything wider.
+    #[serde(default)]
+    pub admin_token: String,
 }
 
 fn default_timezone() -> String {
@@ -157,6 +164,7 @@ impl Default for Config {
             sntp_servers: default_sntp_servers(),
             schedule: default_schedule(),
             wireguard: WireguardConfig::default(),
+            admin_token: String::new(),
         }
     }
 }
