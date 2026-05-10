@@ -120,13 +120,9 @@ fn main() -> Result<()> {
         eth
     };
 
-    let _mdns = match mdns_init::start(&config.wifi.hostname) {
-        Ok(m) => Some(m),
-        Err(e) => {
-            warn!("mdns init failed: {e:?}");
-            None
-        }
-    };
+    if let Err(e) = mdns_init::start(&config.wifi.hostname) {
+        warn!("mdns init failed: {e:?}");
+    }
 
     log_telnet::spawn(23);
     let _httpd = http_server::spawn(app.clone(), nvs_store.clone(), 80)?;
