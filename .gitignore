@@ -5,6 +5,12 @@ managed_components/
 build/
 .idf-component-cache/
 
+# Python (Playwright tests)
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
 # Editor
 .vscode/
 .idea/
