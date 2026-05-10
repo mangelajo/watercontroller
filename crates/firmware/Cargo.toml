@@ -41,3 +41,4 @@ qemu = []
 [package.metadata.esp-idf-sys]
 esp_idf_version = "v5.3.3"
 esp_idf_components = []
+esp_idf_sdkconfig_defaults = ["sdkconfig.defaults"]

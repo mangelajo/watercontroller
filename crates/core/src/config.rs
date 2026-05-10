@@ -205,6 +205,12 @@ impl Config {
         nvs.set(NVS_KEY, &bytes)?;
         Ok(())
     }
+
+    /// Erase the persisted config so the next boot uses defaults.
+    pub fn factory_reset(nvs: &dyn NvsStore) -> Result<(), ConfigError> {
+        nvs.remove(NVS_KEY)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -67,5 +67,5 @@ exec "$QEMU_BIN" \
     -nographic \
     -machine esp32 \
     -drive "file=$FLASH,if=mtd,format=raw" \
-    -nic "user,model=open_eth,hostfwd=tcp::18080-:80,hostfwd=tcp::18023-:23" \
+    -nic "user,model=open_eth,id=lo0,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18023-:23" \
     -global driver=esp32.gpio,property=strap_mode,value=0x12

@@ -12,3 +12,6 @@ build-std = ["std", "panic_abort"]
 [env]
 MCU = "esp32"
 ESP_IDF_VERSION = "v5.3.3"
+# Tell esp-idf-sys which crate owns the sdkconfig + ESP-IDF build context.
+# Without this it tries to infer and fails in workspace layouts.
+ESP_IDF_SYS_ROOT_CRATE = "watercontroller-firmware"

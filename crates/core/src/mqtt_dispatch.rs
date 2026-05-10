@@ -229,9 +229,9 @@ mod tests {
         };
         integ.on_connect();
 
-        // 8 discovery messages + 1 availability online
+        // 12 discovery messages (5 sensors + 4 diagnostics + 3 switches) + 1 availability online
         let pubs = mqtt.published.lock().unwrap();
-        assert_eq!(pubs.len(), 9);
+        assert_eq!(pubs.len(), 13);
         // Subscriptions for each command topic
         let subs = mqtt.subscriptions.lock().unwrap();
         assert_eq!(subs.len(), 3);

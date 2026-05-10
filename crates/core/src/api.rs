@@ -56,4 +56,8 @@ pub mod routes {
     pub const SWITCH: &str = "/api/switch";
     pub const LOGS_WS: &str = "/ws/logs";
     pub const OTA_UPLOAD: &str = "/api/ota";
+    /// POST: erase NVS config and reboot the device. Returns 202 Accepted then
+    /// proceeds with the reboot. Implemented on firmware only — the host build
+    /// returns 501 since there's no persistent storage to wipe.
+    pub const FACTORY_RESET: &str = "/api/factory_reset";
 }

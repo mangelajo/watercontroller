@@ -18,7 +18,11 @@ const MAX_BODY: usize = 32 * 1024;
 const JSON_CT: &[(&str, &str)] = &[("Content-Type", "application/json")];
 const HTML_CT: &[(&str, &str)] = &[("Content-Type", "text/html; charset=utf-8")];
 
-pub fn spawn(app: App, port: u16) -> Result<EspHttpServer<'static>> {
+pub fn spawn(
+    app: App,
+    nvs: Arc<dyn NvsStore>,
+    port: u16,
+) -> Result<EspHttpServer<'static>> {
     let cfg = esp_idf_svc::http::server::Configuration {
         http_port: port,
         ..Default::default()
@@ -116,6 +120,33 @@ pub fn spawn(app: App, port: u16) -> Result<EspHttpServer<'static>> {
                     resp.write_all(&body)?;
                 }
             }
+            Ok(())
+        })?;
+    }
+
+    // POST /api/factory_reset → erase NVS config and reboot.
+    {
+        let nvs = nvs.clone();
+        server.fn_handler::<EspIOError, _>(routes::FACTORY_RESET, Method::Post, move |req| {
+            log::warn!("factory reset requested via HTTP");
+            if let Err(e) = Config::factory_reset(&*nvs) {
+                let body = serde_json::to_vec(&ApiError::new(format!("erase failed: {e}")))
+                    .unwrap_or_default();
+                let mut resp = req.into_response(500, None, JSON_CT)?;
+                resp.write_all(&body)?;
+                return Ok(());
+            }
+            // 202 Accepted; client gets the response, then the device reboots.
+            let _ = req.into_response(202, None, &[])?;
+            // Schedule restart after a brief delay so the response actually flushes.
+            std::thread::Builder::new()
+                .name("reset-reboot".into())
+                .stack_size(2048)
+                .spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    unsafe { esp_idf_svc::sys::esp_restart() };
+                })
+                .ok();
             Ok(())
         })?;
     }

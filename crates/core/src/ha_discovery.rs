@@ -223,6 +223,44 @@ pub fn all_messages(ctx: &DeviceContext) -> Vec<DiscoveryMsg> {
         icon: Some("mdi:timer-outline"),
         precision: Some(0),
     }));
+    // Diagnostic sensors — published as regular sensors but surfaced under
+    // HA's "diagnostic" entity category in the device card.
+    out.push(ctx.sensor(&Sensor {
+        key: "wifi_rssi",
+        name: "WiFi signal",
+        unit: Some("dBm"),
+        device_class: Some("signal_strength"),
+        state_class: Some("measurement"),
+        icon: None,
+        precision: Some(0),
+    }));
+    out.push(ctx.sensor(&Sensor {
+        key: "free_heap",
+        name: "Free heap",
+        unit: Some("B"),
+        device_class: Some("data_size"),
+        state_class: Some("measurement"),
+        icon: Some("mdi:memory"),
+        precision: Some(0),
+    }));
+    out.push(ctx.sensor(&Sensor {
+        key: "uptime",
+        name: "Uptime",
+        unit: Some("s"),
+        device_class: Some("duration"),
+        state_class: Some("total_increasing"),
+        icon: Some("mdi:timer-outline"),
+        precision: Some(0),
+    }));
+    out.push(ctx.sensor(&Sensor {
+        key: "reset_reason",
+        name: "Reset reason",
+        unit: None,
+        device_class: None,
+        state_class: None,
+        icon: Some("mdi:restart-alert"),
+        precision: None,
+    }));
     out.push(ctx.switch(&Switch { key: "sprinkler_1", name: "Riego exterior" }));
     out.push(ctx.switch(&Switch { key: "sprinkler_2", name: "Riego mobil" }));
     out.push(ctx.switch(&Switch { key: "water_control", name: "Water control" }));
@@ -296,6 +334,13 @@ mod tests {
         assert!(topics
             .iter()
             .any(|t| t.contains("switch/doremorwater_water_control")));
-        assert_eq!(msgs.len(), 8);
+        assert!(topics
+            .iter()
+            .any(|t| t.contains("sensor/doremorwater_wifi_rssi")));
+        assert!(topics
+            .iter()
+            .any(|t| t.contains("sensor/doremorwater_uptime")));
+        // 5 measurement sensors + 4 diagnostic sensors + 3 switches = 12.
+        assert_eq!(msgs.len(), 12);
     }
 }

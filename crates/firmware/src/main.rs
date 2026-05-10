@@ -10,6 +10,8 @@ mod mqtt_client;
 mod net_ota;
 mod net_wg;
 mod net_wifi;
+#[cfg(feature = "qemu")]
+mod qemu_eth;
 mod tee_log;
 
 use anyhow::Result;
@@ -98,16 +100,24 @@ fn main() -> Result<()> {
         spawn_mqtt_supervisor(app.clone(), mqtt.clone(), wifi.clone());
     }
     #[cfg(feature = "qemu")]
-    {
-        let _ = (&peripherals.modem, &sys_loop, &nvs_part);
+    let _eth = {
+        let _ = (&peripherals.modem, &nvs_part);
+        log::info!("qemu feature enabled: bringing up open_eth instead of WiFi");
+        let eth = qemu_eth::start(peripherals.mac, sys_loop.clone())?;
+        let ip = eth
+            .eth()
+            .netif()
+            .get_ip_info()
+            .map(|i| i.ip.to_string())
+            .unwrap_or_else(|_| "0.0.0.0".into());
         app.update_state(|s| {
             s.network.wifi = Some(watercontroller_core::traits::WifiState::Connected {
                 ssid: "qemu-open-eth".into(),
-                ip: "10.0.2.15".into(),
+                ip,
             });
         });
-        log::info!("qemu feature enabled: WiFi + MQTT skipped");
-    }
+        eth
+    };
 
     log_telnet::spawn(23);
     let _httpd = http_server::spawn(app.clone(), 80)?;

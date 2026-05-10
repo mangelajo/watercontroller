@@ -25,3 +25,8 @@ CONFIG_ESP_WIFI_ENABLED=y
 
 # FreeRTOS tick rate — 1ms ticks for finer timing in valve sequencer.
 CONFIG_FREERTOS_HZ=1000
+
+# Open-cores ETH driver: only used under `--features qemu` to attach lwIP to
+# QEMU's open_eth virtual NIC. Adds ~few KB on real hardware where it goes
+# unused; cheap insurance for a ground-truth simulator.
+CONFIG_ETH_USE_OPENETH=y

@@ -50,6 +50,14 @@ impl From<WaterState> for WaterControlState {
 pub struct Network {
     pub wifi: Option<WifiState>,
     pub mqtt_connected: bool,
+    pub wifi_rssi_dbm: Option<i8>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct Diagnostics {
+    pub free_heap_bytes: Option<u32>,
+    pub min_free_heap_bytes: Option<u32>,
+    pub reset_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -57,6 +65,7 @@ pub struct DeviceSnapshot {
     pub sensors: Sensors,
     pub switches: Switches,
     pub network: Network,
+    pub diagnostics: Diagnostics,
     pub uptime_ms: u64,
     pub firmware_version: String,
 }
