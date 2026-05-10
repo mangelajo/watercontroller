@@ -17,13 +17,16 @@ mod tee_log;
 
 use anyhow::Result;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
+use esp_idf_svc::hal::gpio::AnyOutputPin;
+use esp_idf_svc::hal::peripheral::Peripheral;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
-use hw_adc::PlaceholderAdc;
+use hw_adc::EspAdcChan;
 use hw_clock::EspClock;
+use hw_gpio::EspGpioOut;
 use hw_nvs::EspNvsStore;
-use hw_pcnt::PlaceholderPcnt;
-use watercontroller_core::traits::{Adc, PulseCounter};
+use hw_pcnt::EspPulseCounter;
+use watercontroller_core::traits::{Adc, GpioOut, PulseCounter};
 use log::{info, warn};
 use mqtt_client::EspMqtt;
 use net_wifi::WifiSupervisor;
@@ -49,6 +52,45 @@ fn main() -> Result<()> {
     let peripherals = Peripherals::take()?;
     let nvs_part = EspDefaultNvsPartition::take()?;
     let sys_loop = EspSystemEventLoop::take()?;
+
+    // Take application-level peripherals (GPIO outputs, ADC channels,
+    // PCNT for the flow meter). These are independent of the WiFi /
+    // open_eth choice, so we set them up before the cfg-gated networking.
+    let pins = peripherals.pins;
+    let valve_open = EspGpioOut::new(AnyOutputPin::from(pins.gpio26))?;
+    let valve_close = EspGpioOut::new(AnyOutputPin::from(pins.gpio27))?;
+    let drain = EspGpioOut::new(AnyOutputPin::from(pins.gpio25))?;
+    let sprinkler1_pin = EspGpioOut::new(AnyOutputPin::from(pins.gpio12))?;
+    let sprinkler2_pin = EspGpioOut::new(AnyOutputPin::from(pins.gpio4))?;
+    let _led1 = EspGpioOut::new(AnyOutputPin::from(pins.gpio13))?;
+    let _led2 = EspGpioOut::new(AnyOutputPin::from(pins.gpio14))?;
+    // ADC reads also hang under QEMU. Hardware path uses real driver;
+    // qemu path falls back to placeholders so the calibration pipeline
+    // still produces visible output.
+    #[cfg(not(feature = "qemu"))]
+    let (battery_adc, pressure_adc) =
+        hw_adc::build_battery_pressure(peripherals.adc1, pins.gpio36, pins.gpio32)?;
+    #[cfg(feature = "qemu")]
+    let (battery_adc, pressure_adc) = {
+        let _ = (peripherals.adc1, pins.gpio36, pins.gpio32);
+        (
+            hw_adc::PlaceholderAdc(1130), // calibrates to 5.00 V
+            hw_adc::PlaceholderAdc(0),    // calibrates to ~0 bar
+        )
+    };
+    // ESP-IDF's legacy PCNT driver crashes at init under QEMU (the qemu
+    // PCNT model is incomplete). On real hardware it works; in qemu we
+    // substitute the no-op placeholder. Each branch produces a different
+    // concrete type — the consumer (spawn_sensor_task) is generic so this
+    // is a compile-time choice.
+    #[cfg(not(feature = "qemu"))]
+    let pcnt = EspPulseCounter::new(peripherals.pcnt0, pins.gpio33.into())?;
+    #[cfg(feature = "qemu")]
+    let pcnt = {
+        let _ = peripherals.pcnt0;
+        let _ = pins.gpio33;
+        hw_pcnt::PlaceholderPcnt::default()
+    };
 
     // Initialize the netif layer up-front. Both the WiFi supervisor (real hw
     // path) and the qemu/ETH path need this to be done before any network
@@ -140,18 +182,28 @@ fn main() -> Result<()> {
     // Schedule executor: once-per-minute evaluator.
     spawn_schedule_task(app.clone(), clock.clone());
 
-    // Sensor task — reads ADC/PCNT (currently placeholders), applies the
-    // calibration tables from config, and updates the device snapshot.
-    spawn_sensor_task(app.clone(), clock.clone());
+    // Sensor task — reads ADC/PCNT, applies calibration, updates state.
+    spawn_sensor_task(app.clone(), clock.clone(), battery_adc, pressure_adc, pcnt);
 
-    // Tick task — drives switches + valve sequencer at 10 ms.
+    // Tick task — drives switches + valve sequencer at 10 ms, applies the
+    // resulting outputs to actual GPIO pins.
     {
         let app = app.clone();
+        let mut valve_open = valve_open;
+        let mut valve_close = valve_close;
+        let mut drain = drain;
+        let mut sprinkler1_pin = sprinkler1_pin;
+        let mut sprinkler2_pin = sprinkler2_pin;
         std::thread::Builder::new()
             .name("tick".into())
             .stack_size(8 * 1024)
             .spawn(move || loop {
-                let _ = app.tick();
+                let outputs = app.tick();
+                valve_open.set(outputs.valve.open_coil);
+                valve_close.set(outputs.valve.close_coil);
+                drain.set(outputs.valve.drain);
+                sprinkler1_pin.set(outputs.sprinkler_1);
+                sprinkler2_pin.set(outputs.sprinkler_2);
                 std::thread::sleep(Duration::from_millis(10));
             })
             .ok();
@@ -207,18 +259,21 @@ fn reset_reason_label(r: esp_idf_svc::sys::esp_reset_reason_t) -> &'static str {
     }
 }
 
-fn spawn_sensor_task(app: App, clock: Arc<dyn Clock>) {
+fn spawn_sensor_task<B, P, C>(
+    app: App,
+    clock: Arc<dyn Clock>,
+    mut battery_adc: B,
+    mut pressure_adc: P,
+    pcnt: C,
+) where
+    B: Adc + Send + 'static,
+    P: Adc + Send + 'static,
+    C: PulseCounter + Send + 'static,
+{
     std::thread::Builder::new()
         .name("sensors".into())
         .stack_size(8 * 1024)
         .spawn(move || {
-            // Placeholder peripherals — replaced with real ADC/PCNT
-            // wrappers in a future milestone (see crates/firmware/src/hw_adc.rs
-            // and hw_pcnt.rs). The pipeline is identical; only the trait
-            // implementations change.
-            let mut battery_adc = PlaceholderAdc(1130); // → 5.00 V via default cal
-            let mut pressure_adc = PlaceholderAdc(0); // → ~0 bar default
-            let pcnt = PlaceholderPcnt::default();
 
             // Battery uses sliding-window moving avg, window=15.
             let mut bat_window: std::collections::VecDeque<f32> = std::collections::VecDeque::with_capacity(15);
