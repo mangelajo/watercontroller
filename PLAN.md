@@ -196,14 +196,13 @@ it doesn't need a trait at all; just write a pure function.
 | M10 OTA | ✅ Compiles, host-untested rollback | `POST /api/ota` streams body into inactive slot via `EspOta::initiate_update`/`write`/`complete`, then reboots. Boot path calls `mark_running_slot_valid()` after self-test passes. Rollback only verifiable on hardware. |
 | M11 Wireguard | ⏳ Stub | Skeleton at `firmware::net_wg`. Highest risk; should be last per plan. |
 
-**What's tested:** `cargo test -p watercontroller-core` exercises calibration, valve sequencing (with fake clock), schedule evaluation (incl. missed-minute recovery and DST-jump cap), HA Discovery payload shapes, MQTT command routing, NVS round-trip, log ring buffer eviction. **No firmware-side hardware behavior is tested** because there is no board attached during this scaffolding pass.
+**What's tested:** `cargo test -p watercontroller-core` exercises calibration, valve sequencing (with fake clock), schedule evaluation (incl. missed-minute recovery and DST-jump cap), HA Discovery payload shapes, MQTT command routing, NVS round-trip, log ring buffer eviction. **Hardware-attached behaviors** (real WiFi, ADC/PCNT, GPIO levels, OTA rollback) are not covered. The QEMU smoke (see "QEMU emulation" section) covers boot, HTTPD, WS logs, OTA upload accept, factory reset, auth round-trips.
 
 **What's known to not yet work on real hardware:**
 - ADC reads return a placeholder constant.
 - PCNT (water flow) returns 0.
 - GPIO outputs from the valve sequencer are not connected to physical pins.
-- MQTT client doesn't connect anywhere.
-- OTA endpoint is unimplemented.
+- MQTT client doesn't connect anywhere (compiles + dispatches; no real broker reached yet).
 - Wireguard tunnel cannot be brought up.
 
 ## Build milestones
