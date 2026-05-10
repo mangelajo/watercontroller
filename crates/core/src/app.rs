@@ -134,21 +134,37 @@ impl App {
         match cmd {
             SwitchCommand::Sprinkler1 { on } => {
                 let mut s = self.inner.sprinkler1.lock().unwrap();
+                let was_on = s.is_on();
                 if on { s.turn_on(now); } else { s.turn_off(now); }
+                if was_on != on {
+                    log::info!("sprinkler_1: {} (manual)", if on { "ON" } else { "off" });
+                }
                 CommandOutcome::Ok
             }
             SwitchCommand::Sprinkler2 { on } => {
                 let mut s = self.inner.sprinkler2.lock().unwrap();
+                let was_on = s.is_on();
                 if on { s.turn_on(now); } else { s.turn_off(now); }
+                if was_on != on {
+                    log::info!("sprinkler_2: {} (manual)", if on { "ON" } else { "off" });
+                }
                 CommandOutcome::Ok
             }
             SwitchCommand::WaterControl { on } => {
                 let mut v = self.inner.valve.lock().unwrap();
                 if v.is_busy() {
+                    log::warn!(
+                        "water_control: refused {} — valve in mid-sequence",
+                        if on { "on" } else { "off" }
+                    );
                     return CommandOutcome::Busy {
                         reason: "valve sequence in progress".into(),
                     };
                 }
+                log::info!(
+                    "water_control: {} sequence starting",
+                    if on { "open" } else { "close" }
+                );
                 if on { v.turn_on(now); } else { v.turn_off(now); }
                 CommandOutcome::Ok
             }
@@ -161,10 +177,18 @@ impl App {
     pub fn tick(&self) -> TickOutputs {
         let now = self.inner.clock.monotonic_ms();
 
-        // Drive timers under per-component locks. Order is irrelevant.
-        self.inner.sprinkler1.lock().unwrap().tick(now);
-        self.inner.sprinkler2.lock().unwrap().tick(now);
+        // Drive timers under per-component locks. The TimedSwitch ticks
+        // tell us whether *this* tick was the one that fired auto-off, so
+        // we can log it without false-positives from manual `turn_off`.
+        let s1_auto_off_fired = self.inner.sprinkler1.lock().unwrap().tick(now);
+        let s2_auto_off_fired = self.inner.sprinkler2.lock().unwrap().tick(now);
         let valve_outputs = self.inner.valve.lock().unwrap().tick(now);
+        if s1_auto_off_fired {
+            log::info!("sprinkler_1: off (auto-off after timer expiry)");
+        }
+        if s2_auto_off_fired {
+            log::info!("sprinkler_2: off (auto-off after timer expiry)");
+        }
 
         // Mirror state into the snapshot. Re-acquire the locks briefly to
         // minimise time held simultaneously.
@@ -173,9 +197,20 @@ impl App {
         let valve_state = self.inner.valve.lock().unwrap().state();
 
         self.inner.state.update(|s| {
+            // Water control transitions are logged on every state change
+            // because they're driven by the valve's internal sequencer
+            // (open/close coil timing), not by an explicit user op.
+            let new_wc = WaterControlState::from(valve_state);
+            if s.switches.water_control != new_wc {
+                log::info!(
+                    "water_control: {:?} → {:?}",
+                    s.switches.water_control,
+                    new_wc
+                );
+            }
             s.switches.sprinkler_1 = s1_on;
             s.switches.sprinkler_2 = s2_on;
-            s.switches.water_control = WaterControlState::from(valve_state);
+            s.switches.water_control = new_wc;
         });
 
         // Persist user-visible valve state to NVS on transition. We only

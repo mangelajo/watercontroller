@@ -337,8 +337,10 @@ fn register_handlers(
             if require_auth(&req, &app).is_err() {
                 return write_unauthorized(req);
             }
-            log::info!("ota: upload starting");
+            let started_at = std::time::Instant::now();
+            log::info!("ota: upload starting (peer requested)");
             let mut total = 0usize;
+            let mut next_progress_at: usize = 256 * 1024; // log every 256 KiB
             // Drive crate::net_ota::apply_image with a reader that pulls from
             // the HTTP connection. Note: we cannot use core's apply_image
             // directly because the EspOtaUpdate's lifetime is tied to the
@@ -370,6 +372,7 @@ fn register_handlers(
                     Ok(0) => break,
                     Ok(n) => {
                         if let Err(e) = update.write(&buf[..n]) {
+                            log::error!("ota: write failed at {} bytes: {e}", total);
                             let _ = update.abort();
                             let body = serde_json::to_vec(&ApiError::new(format!(
                                 "ota write @ {total}: {e}"
@@ -380,8 +383,13 @@ fn register_handlers(
                             return Ok(());
                         }
                         total += n;
+                        if total >= next_progress_at {
+                            log::info!("ota: {} KiB written", total / 1024);
+                            next_progress_at = total + 256 * 1024;
+                        }
                     }
                     Err(e) => {
+                        log::error!("ota: recv failed at {} bytes: {e}", total);
                         let _ = update.abort();
                         let body = serde_json::to_vec(&ApiError::new(format!(
                             "ota recv @ {total}: {e}"
@@ -394,6 +402,7 @@ fn register_handlers(
                 }
             }
             if total == 0 {
+                log::warn!("ota: empty image, aborting");
                 let _ = update.abort();
                 let body = serde_json::to_vec(&ApiError::new("empty image")).unwrap_or_default();
                 let mut resp = req.into_response(400, None, JSON_CT)?;
@@ -401,13 +410,20 @@ fn register_handlers(
                 return Ok(());
             }
             if let Err(e) = update.complete() {
+                log::error!("ota: complete() failed: {e}");
                 let body = serde_json::to_vec(&ApiError::new(format!("ota complete: {e}")))
                     .unwrap_or_default();
                 let mut resp = req.into_response(500, None, JSON_CT)?;
                 resp.write_all(&body)?;
                 return Ok(());
             }
-            log::info!("ota: applied {total} bytes; rebooting into new slot");
+            let dur = started_at.elapsed();
+            log::info!(
+                "ota: image applied — {} KiB in {:.1}s ({:.0} KiB/s); rebooting into new slot",
+                total / 1024,
+                dur.as_secs_f64(),
+                (total as f64 / 1024.0) / dur.as_secs_f64()
+            );
             let body = serde_json::to_vec(&serde_json::json!({
                 "result": "ok", "bytes": total
             }))

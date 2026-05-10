@@ -45,17 +45,21 @@ impl TimedSwitch {
         self.on_since = None;
     }
 
-    /// Advance time. If an auto-off duration is configured and it has elapsed
-    /// since the last `turn_on`, the switch flips to off.
-    pub fn tick(&mut self, now_ms: u64) {
+    /// Advance time. If an auto-off duration is configured and it has
+    /// elapsed since the last `turn_on`, the switch flips to off. Returns
+    /// `true` only when this tick was the one that fired the auto-off, so
+    /// the caller can distinguish a timer expiry from a manual `turn_off`.
+    pub fn tick(&mut self, now_ms: u64) -> bool {
         if !self.on {
-            return;
+            return false;
         }
-        let Some(d) = self.auto_off else { return };
-        let Some(OnSince(t0)) = self.on_since else { return };
+        let Some(d) = self.auto_off else { return false };
+        let Some(OnSince(t0)) = self.on_since else { return false };
         if now_ms.saturating_sub(t0) >= d.as_millis() as u64 {
             self.turn_off(now_ms);
+            return true;
         }
+        false
     }
 }
 

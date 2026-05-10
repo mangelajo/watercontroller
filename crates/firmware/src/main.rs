@@ -476,20 +476,47 @@ fn spawn_schedule_task(app: App, clock: Arc<dyn Clock>) {
             // for fallback (Europe/Madrid: +01:00 winter / +02:00 summer).
             // Proper TZ resolution lands when chrono-tz is added.
             let mut last_local = local_now(&*clock, &app.config().timezone);
+            let active = app
+                .config()
+                .schedule
+                .rules
+                .iter()
+                .filter(|r| r.enabled)
+                .count();
+            info!(
+                "schedule: starting evaluator, {} active rule(s), tz={}",
+                active,
+                app.config().timezone
+            );
             loop {
                 std::thread::sleep(Duration::from_secs(30));
                 let cfg = app.config();
                 let now_local = local_now(&*clock, &cfg.timezone);
                 let hits = cfg.schedule.evaluate_range(last_local, now_local);
+                log::debug!(
+                    "schedule: eval window {} → {} ({} hit{})",
+                    last_local.format("%H:%M:%S"),
+                    now_local.format("%H:%M:%S"),
+                    hits.len(),
+                    if hits.len() == 1 { "" } else { "s" }
+                );
                 for rule in hits {
-                    info!("schedule fire: {} → {:?}", rule.id, rule.action);
+                    info!(
+                        "schedule: fire id='{}' action={:?} at {}",
+                        rule.id,
+                        rule.action,
+                        now_local.format("%Y-%m-%d %H:%M:%S")
+                    );
                     use watercontroller_core::api::SwitchCommand;
                     use watercontroller_core::schedule::Action;
                     let cmd = match &rule.action {
                         Action::Switch { id } => match id.as_str() {
                             "sprinkler_1" => Some(SwitchCommand::Sprinkler1 { on: true }),
                             "sprinkler_2" => Some(SwitchCommand::Sprinkler2 { on: true }),
-                            _ => None,
+                            other => {
+                                log::warn!("schedule: rule '{}' references unknown switch '{}', skipping", rule.id, other);
+                                None
+                            }
                         },
                         Action::WaterControl { on } => {
                             Some(SwitchCommand::WaterControl { on: *on })
