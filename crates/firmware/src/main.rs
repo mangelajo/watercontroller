@@ -48,6 +48,13 @@ fn main() -> Result<()> {
     let nvs_part = EspDefaultNvsPartition::take()?;
     let sys_loop = EspSystemEventLoop::take()?;
 
+    // Initialize the netif layer up-front. Both the WiFi supervisor (real hw
+    // path) and the qemu/ETH path need this to be done before any network
+    // service spawns; doing it here is a no-op if it's already initialized.
+    unsafe {
+        let _ = esp_idf_svc::sys::esp_netif_init();
+    }
+
     // Open the "wc" NVS namespace and load runtime config (defaults if absent).
     let nvs = EspNvs::new(nvs_part.clone(), "wc", true)?;
     let nvs_store: Arc<dyn NvsStore> = Arc::new(EspNvsStore::new(nvs));
@@ -70,21 +77,37 @@ fn main() -> Result<()> {
     let clock: Arc<dyn Clock> = Arc::new(EspClock);
     let app = App::new(clock.clone(), config.clone());
 
-    // Bring up WiFi (multi-SSID with AP fallback).
-    let wifi = WifiSupervisor::spawn(
-        peripherals.modem,
-        sys_loop.clone(),
-        nvs_part.clone(),
-        config.wifi.ap_ssid.clone(),
-        config.wifi.ap_password.clone(),
-        config.wifi.networks.clone(),
-    )?;
-    spawn_wifi_state_mirror(app.clone(), wifi.clone());
+    // Bring up WiFi (multi-SSID with AP fallback). The `qemu` feature skips
+    // this — qemu doesn't simulate the WiFi peripheral well enough to
+    // initialize `EspWifi`. open_eth provides networking instead.
+    #[cfg(not(feature = "qemu"))]
+    {
+        let wifi = WifiSupervisor::spawn(
+            peripherals.modem,
+            sys_loop.clone(),
+            nvs_part.clone(),
+            config.wifi.ap_ssid.clone(),
+            config.wifi.ap_password.clone(),
+            config.wifi.networks.clone(),
+        )?;
+        spawn_wifi_state_mirror(app.clone(), wifi.clone());
 
-    // MQTT: connect once WiFi is up. Spawned task waits for STA up and (re)connects
-    // to the broker on link recovery, then publishes HA Discovery + retained state.
-    let mqtt: Arc<EspMqtt> = Arc::new(EspMqtt::new());
-    spawn_mqtt_supervisor(app.clone(), mqtt.clone(), wifi.clone());
+        // MQTT: connect once WiFi is up. Spawned task waits for STA up and (re)connects
+        // to the broker on link recovery, then publishes HA Discovery + retained state.
+        let mqtt: Arc<EspMqtt> = Arc::new(EspMqtt::new());
+        spawn_mqtt_supervisor(app.clone(), mqtt.clone(), wifi.clone());
+    }
+    #[cfg(feature = "qemu")]
+    {
+        let _ = (&peripherals.modem, &sys_loop, &nvs_part);
+        app.update_state(|s| {
+            s.network.wifi = Some(watercontroller_core::traits::WifiState::Connected {
+                ssid: "qemu-open-eth".into(),
+                ip: "10.0.2.15".into(),
+            });
+        });
+        log::info!("qemu feature enabled: WiFi + MQTT skipped");
+    }
 
     log_telnet::spawn(23);
     let _httpd = http_server::spawn(app.clone(), 80)?;

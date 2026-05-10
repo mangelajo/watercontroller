@@ -33,6 +33,10 @@ std = ["esp-idf-svc/binstart", "esp-idf-svc/std"]
 alloc = ["esp-idf-svc/alloc"]
 nightly = ["esp-idf-svc/nightly"]
 experimental = ["esp-idf-svc/experimental"]
+# Build for QEMU: skips WiFi init (qemu's lwIP shim doesn't simulate the
+# WiFi peripheral well enough for `EspWifi::new`) so HTTPD + tasks can come
+# up via the open_eth NIC. Use as: `scripts/qemu.sh` (set automatically).
+qemu = []
 
 [package.metadata.esp-idf-sys]
 esp_idf_version = "v5.3.3"
