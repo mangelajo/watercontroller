@@ -140,6 +140,64 @@
   .status-msg.ok  { color: var(--good); }
   .status-msg.err { color: var(--bad); }
 
+  /* Form inputs */
+  .field { display: grid; gap: 4px; margin-bottom: 12px; }
+  .field label { font-size: 12px; color: var(--muted); }
+  .field .hint { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  input[type="text"], input[type="password"], input[type="number"], input[type="url"],
+  textarea.pem, select {
+    background: #0a0d12; border: 1px solid var(--border);
+    color: var(--text); padding: 8px 10px; border-radius: 6px;
+    font: inherit; box-sizing: border-box; width: 100%;
+  }
+  input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  textarea.pem {
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    min-height: 80px; resize: vertical;
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 600px) { .grid2 { grid-template-columns: 1fr; } }
+
+  /* Repeating-row lists (WiFi networks, schedule rules) */
+  .list-row {
+    display: flex; gap: 8px; align-items: end;
+    padding: 8px; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 6px;
+    margin-bottom: 8px;
+  }
+  .list-row .field { flex: 1 1 auto; margin: 0; }
+  .list-row .remove {
+    background: transparent; color: var(--bad);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 10px; cursor: pointer;
+  }
+  .list-row .remove:hover { border-color: var(--bad); }
+  .add-row {
+    background: transparent; color: var(--accent);
+    border: 1px dashed var(--border); border-radius: 6px;
+    padding: 8px 14px; cursor: pointer; font: inherit;
+  }
+  .add-row:hover { border-color: var(--accent); }
+
+  details > summary {
+    cursor: pointer; padding: 6px 0;
+    color: var(--muted); font-size: 12px; user-select: none;
+  }
+  details[open] > summary { color: var(--text); }
+
+  /* AP-mode prominent banner on the dashboard */
+  .banner {
+    grid-column: 1 / -1;
+    background: linear-gradient(135deg, #4a2c00, #2a1a00);
+    border: 1px solid var(--warn); border-radius: 12px;
+    padding: 18px 22px; box-shadow: var(--shadow);
+  }
+  .banner h2 { margin: 0 0 6px; color: var(--warn); font-size: 14px; text-transform: none; letter-spacing: 0; }
+  .banner p { margin: 0; color: var(--text); }
+
+  .toggle-cb { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+  .toggle-cb input { width: auto; }
+
   footer {
     text-align: center; color: var(--muted);
     padding: 18px; font-size: 12px;
@@ -163,6 +221,13 @@
   </nav>
 
   <main id="dashboard" class="tab active">
+    <section class="banner" id="ap-banner" style="display: none;">
+      <h2>📶 First-time setup — device is in AP fallback</h2>
+      <p>The device couldn't reach any of its configured WiFi networks and is now hosting its
+        own access point. Open <strong>Settings → WiFi</strong> below to add a network the
+        device can join. Once it connects, this banner goes away.</p>
+    </section>
+
     <section class="card">
       <h2>Sensors</h2>
       <div class="metric"><span class="label">Battery</span><span><span class="value" id="m-battery">—</span><span class="unit">V</span></span></div>
@@ -196,15 +261,223 @@
   </main>
 
   <main id="settings" class="tab" style="grid-template-columns: 1fr;">
+    <!-- WiFi --------------------------------------------------------- -->
     <section class="card full">
-      <h2>Config (JSON)</h2>
-      <textarea id="cfg-json" class="config" spellcheck="false"></textarea>
+      <h2>WiFi</h2>
+      <div class="grid2">
+        <div class="field">
+          <label for="wifi-hostname">Hostname (mDNS &amp; default base topic)</label>
+          <input type="text" id="wifi-hostname">
+        </div>
+        <div class="field">
+          <label for="wifi-ap-ssid">AP fallback SSID</label>
+          <input type="text" id="wifi-ap-ssid">
+        </div>
+      </div>
+      <div class="field">
+        <label for="wifi-ap-password">AP fallback password (empty = open AP)</label>
+        <input type="text" id="wifi-ap-password" autocomplete="off">
+      </div>
+      <h3 style="margin: 16px 0 8px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px;">
+        Known networks (tried in order)
+      </h3>
+      <div id="wifi-networks"></div>
+      <button class="add-row" id="wifi-add">+ Add network</button>
       <div class="row">
-        <button class="btn primary" id="cfg-save">Save</button>
-        <button class="btn" id="cfg-reload">Reload from device</button>
-        <span class="status-msg" id="cfg-msg"></span>
+        <button class="btn primary" id="wifi-save">Save WiFi</button>
+        <span class="status-msg" id="wifi-msg"></span>
       </div>
     </section>
+
+    <!-- MQTT --------------------------------------------------------- -->
+    <section class="card full">
+      <h2>MQTT</h2>
+      <label class="toggle-cb">
+        <input type="checkbox" id="mqtt-enabled"> Connect to broker on boot
+      </label>
+      <div class="field" style="margin-top: 10px;">
+        <label for="mqtt-broker-url">Broker URL</label>
+        <input type="url" id="mqtt-broker-url" placeholder="mqtt://homeassistant.local:1883">
+        <span class="hint">Use <code>mqtts://</code> for TLS. Pair with the cert fields below.</span>
+      </div>
+      <div class="grid2">
+        <div class="field"><label for="mqtt-username">Username</label>
+          <input type="text" id="mqtt-username" autocomplete="off"></div>
+        <div class="field"><label for="mqtt-password">Password</label>
+          <input type="password" id="mqtt-password" autocomplete="off"></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label for="mqtt-base-topic">Base topic</label>
+          <input type="text" id="mqtt-base-topic"></div>
+        <div class="field"><label for="mqtt-discovery-prefix">HA discovery prefix</label>
+          <input type="text" id="mqtt-discovery-prefix"></div>
+      </div>
+      <details>
+        <summary>TLS certificates (optional, paste PEM)</summary>
+        <div class="field"><label for="mqtt-ca-cert">CA certificate (server cert authority)</label>
+          <textarea id="mqtt-ca-cert" class="pem" placeholder="-----BEGIN CERTIFICATE-----"></textarea></div>
+        <div class="grid2">
+          <div class="field"><label for="mqtt-client-cert">Client certificate (mTLS)</label>
+            <textarea id="mqtt-client-cert" class="pem"></textarea></div>
+          <div class="field"><label for="mqtt-client-key">Client private key</label>
+            <textarea id="mqtt-client-key" class="pem"></textarea></div>
+        </div>
+      </details>
+      <div class="row">
+        <button class="btn primary" id="mqtt-save">Save MQTT</button>
+        <span class="status-msg" id="mqtt-msg"></span>
+      </div>
+    </section>
+
+    <!-- Schedule ----------------------------------------------------- -->
+    <section class="card full">
+      <h2>Schedule</h2>
+      <p class="status-msg">Times are interpreted in the device's timezone (configured under Time below).</p>
+      <div id="schedule-rules"></div>
+      <button class="add-row" id="schedule-add">+ Add rule</button>
+      <div class="row">
+        <button class="btn primary" id="schedule-save">Save schedule</button>
+        <span class="status-msg" id="schedule-msg"></span>
+      </div>
+    </section>
+
+    <!-- Time --------------------------------------------------------- -->
+    <section class="card full">
+      <h2>Time &amp; SNTP</h2>
+      <div class="grid2">
+        <div class="field">
+          <label for="tz-name">Timezone</label>
+          <select id="tz-name">
+            <option value="Europe/Madrid">Europe/Madrid</option>
+            <option value="UTC">UTC</option>
+          </select>
+          <span class="hint">Only zones bundled in the firmware are listed. Rebuild with a wider
+            <code>CHRONO_TZ_TIMEZONE_FILTER</code> to add more.</span>
+        </div>
+        <div class="field">
+          <label for="sntp-servers">SNTP servers (one per line)</label>
+          <textarea id="sntp-servers" class="pem" style="min-height: 60px;"></textarea>
+        </div>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="time-save">Save time settings</button>
+        <span class="status-msg" id="time-msg"></span>
+      </div>
+    </section>
+
+    <!-- Sensors ------------------------------------------------------ -->
+    <section class="card full">
+      <h2>Sensor calibration</h2>
+      <details>
+        <summary>Battery voltage (raw ADC → V)</summary>
+        <div id="cal-battery" class="cal-points"></div>
+        <button class="add-row" data-cal="battery">+ Add point</button>
+      </details>
+      <details>
+        <summary>Pressure stage 1 (ADC voltage → intermediate)</summary>
+        <div id="cal-pressure-1" class="cal-points"></div>
+        <button class="add-row" data-cal="pressure_stage1">+ Add point</button>
+      </details>
+      <details>
+        <summary>Pressure stage 2 (intermediate → bar)</summary>
+        <div id="cal-pressure-2" class="cal-points"></div>
+        <button class="add-row" data-cal="pressure_stage2">+ Add point</button>
+      </details>
+      <div class="grid2" style="margin-top: 10px;">
+        <div class="field"><label for="flow-l-per-pulse">Flow: L per pulse (cumulative)</label>
+          <input type="number" step="0.0001" id="flow-l-per-pulse"></div>
+        <div class="field"><label for="flow-lph-per-pps">Flow: L/h per pulse-per-second</label>
+          <input type="number" step="0.0001" id="flow-lph-per-pps"></div>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="sensors-save">Save calibration</button>
+        <span class="status-msg" id="sensors-msg"></span>
+      </div>
+    </section>
+
+    <!-- HTTPS -------------------------------------------------------- -->
+    <section class="card full">
+      <h2>HTTPS</h2>
+      <p class="status-msg">Paste a cert + private key to enable HTTPS on port 443. Requires
+        rebuilding the firmware with <code>CONFIG_ESP_HTTPS_SERVER_ENABLE=y</code> (off in default
+        sdkconfig because of an unrelated qemu issue). Both fields empty = HTTP only.</p>
+      <div class="grid2">
+        <div class="field"><label for="https-cert">Server certificate (PEM)</label>
+          <textarea id="https-cert" class="pem"></textarea></div>
+        <div class="field"><label for="https-key">Server private key (PEM)</label>
+          <textarea id="https-key" class="pem"></textarea></div>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="https-save">Save HTTPS</button>
+        <span class="status-msg" id="https-msg"></span>
+      </div>
+    </section>
+
+    <!-- Wireguard ---------------------------------------------------- -->
+    <section class="card full">
+      <h2>Wireguard</h2>
+      <label class="toggle-cb">
+        <input type="checkbox" id="wg-enabled"> Bring up Wireguard tunnel after WiFi connects
+      </label>
+      <p class="status-msg">⚠ Wireguard FFI is not yet wired in the firmware (M11 in
+        <code>PLAN.md</code>) — these fields persist but the tunnel is not initialized.</p>
+      <div class="grid2" style="margin-top: 10px;">
+        <div class="field"><label for="wg-address">Device tunnel address</label>
+          <input type="text" id="wg-address" placeholder="10.6.0.5"></div>
+        <div class="field"><label for="wg-keepalive">Keepalive (s)</label>
+          <input type="number" id="wg-keepalive" min="0" max="65535"></div>
+      </div>
+      <div class="field"><label for="wg-private-key">Device private key</label>
+        <input type="password" id="wg-private-key" autocomplete="off"></div>
+      <div class="grid2">
+        <div class="field"><label for="wg-peer-endpoint">Peer endpoint (host:port)</label>
+          <input type="text" id="wg-peer-endpoint"></div>
+        <div class="field"><label for="wg-peer-public-key">Peer public key</label>
+          <input type="text" id="wg-peer-public-key"></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label for="wg-peer-psk">Peer pre-shared key</label>
+          <input type="password" id="wg-peer-psk" autocomplete="off"></div>
+        <div class="field"><label for="wg-peer-allowed-ips">Allowed IPs (one per line)</label>
+          <textarea id="wg-peer-allowed-ips" class="pem" style="min-height: 60px;"></textarea></div>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="wg-save">Save Wireguard</button>
+        <span class="status-msg" id="wg-msg"></span>
+      </div>
+    </section>
+
+    <!-- Admin token -------------------------------------------------- -->
+    <section class="card full">
+      <h2>API authentication</h2>
+      <div class="field">
+        <label for="cfg-admin-token">Admin token (Bearer auth)</label>
+        <input type="password" id="cfg-admin-token" autocomplete="off">
+        <span class="hint">When set, every <code>POST</code>/<code>PUT</code> request must
+          carry <code>Authorization: Bearer &lt;token&gt;</code>. Empty = open access (only safe
+          on a trusted LAN). Don't lose this — Factory reset is the only recovery.</span>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="auth-save">Save token</button>
+        <span class="status-msg" id="auth-msg"></span>
+      </div>
+    </section>
+
+    <!-- Advanced (raw JSON editor + import/export) -------------------- -->
+    <section class="card full">
+      <h2>Advanced (raw config)</h2>
+      <details>
+        <summary>Show raw JSON editor</summary>
+        <textarea id="cfg-json" class="config" spellcheck="false"></textarea>
+        <div class="row">
+          <button class="btn primary" id="cfg-save">Save raw JSON</button>
+          <button class="btn" id="cfg-reload">Reload from device</button>
+          <span class="status-msg" id="cfg-msg"></span>
+        </div>
+      </details>
+    </section>
+
+    <!-- OTA --------------------------------------------------------- -->
     <section class="card full">
       <h2>Firmware update (OTA)</h2>
       <p class="status-msg">Pick a release-built <code>watercontroller-firmware</code> ELF and
@@ -220,6 +493,7 @@
       </div>
     </section>
 
+    <!-- Danger ------------------------------------------------------ -->
     <section class="card full">
       <h2>Danger zone</h2>
       <p class="status-msg">Factory reset wipes the persisted config and reboots the device.
@@ -295,10 +569,18 @@
       $("#uptime").textContent  = "uptime " + fmtUptime(s.uptime_ms);
 
       const wifi = s.network && s.network.wifi;
-      if (wifi && wifi.kind === "connected") setConn("good", `wifi: ${wifi.ssid} (${wifi.ip})`);
-      else if (wifi && wifi.kind === "ap_mode") setConn("warn", `AP mode: ${wifi.ssid}`);
-      else if (wifi && wifi.kind === "connecting") setConn("warn", `connecting to ${wifi.ssid}`);
-      else setConn("bad", "offline");
+      const apBanner = $("#ap-banner");
+      if (wifi && wifi.kind === "connected") {
+        setConn("good", `wifi: ${wifi.ssid} (${wifi.ip})`);
+        if (apBanner) apBanner.style.display = "none";
+      } else if (wifi && wifi.kind === "ap_mode") {
+        setConn("warn", `AP mode: ${wifi.ssid}`);
+        if (apBanner) apBanner.style.display = "";
+      } else if (wifi && wifi.kind === "connecting") {
+        setConn("warn", `connecting to ${wifi.ssid}`);
+      } else {
+        setConn("bad", "offline");
+      }
     } catch (e) {
       setConn("bad", "no response");
     }
@@ -363,46 +645,333 @@
     });
   }
 
+  // Config state — refreshed when the Settings tab opens. Each section
+  // reads from / writes back to this object before PUT'ing the whole thing.
+  let currentConfig = null;
+
   async function loadConfig() {
-    const msg = $("#cfg-msg");
-    msg.textContent = "loading…"; msg.className = "status-msg";
     try {
       const r = await fetch("/api/config");
       if (!r.ok) throw new Error("HTTP " + r.status);
-      const cfg = await r.json();
-      $("#cfg-json").value = JSON.stringify(cfg, null, 2);
-      msg.textContent = "loaded"; msg.className = "status-msg ok";
+      currentConfig = await r.json();
+      renderAllForms();
+      $("#cfg-json").value = JSON.stringify(currentConfig, null, 2);
+      msgOk("#cfg-msg", "loaded");
     } catch (e) {
-      msg.textContent = "load failed: " + e.message;
-      msg.className = "status-msg err";
+      msgErr("#cfg-msg", "load failed: " + e.message);
     }
   }
 
-  $("#cfg-reload").addEventListener("click", loadConfig);
-
-  $("#cfg-save").addEventListener("click", async () => {
-    const msg = $("#cfg-msg");
-    let parsed;
-    try { parsed = JSON.parse($("#cfg-json").value); }
-    catch (e) {
-      msg.textContent = "invalid JSON: " + e.message;
-      msg.className = "status-msg err";
-      return;
-    }
-    msg.textContent = "saving…"; msg.className = "status-msg";
+  // Save the (possibly-edited) `currentConfig` to the device. `section`
+  // identifies which form's status indicator to flash.
+  async function saveConfig(section) {
+    msgInfo(`#${section}-msg`, "saving…");
     try {
       const r = await fetch("/api/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify(parsed),
+        body: JSON.stringify(currentConfig),
       });
+      if (r.status === 401) { msgErr(`#${section}-msg`, "401 — admin token missing/wrong"); return; }
       if (!r.ok) throw new Error("HTTP " + r.status);
-      msg.textContent = "saved"; msg.className = "status-msg ok";
+      msgOk(`#${section}-msg`, "saved");
+      $("#cfg-json").value = JSON.stringify(currentConfig, null, 2);
     } catch (e) {
-      msg.textContent = "save failed: " + e.message;
-      msg.className = "status-msg err";
+      msgErr(`#${section}-msg`, "save failed: " + e.message);
     }
+  }
+
+  function msgOk(sel, text)   { const e = $(sel); if (!e) return; e.textContent = text; e.className = "status-msg ok"; }
+  function msgErr(sel, text)  { const e = $(sel); if (!e) return; e.textContent = text; e.className = "status-msg err"; }
+  function msgInfo(sel, text) { const e = $(sel); if (!e) return; e.textContent = text; e.className = "status-msg"; }
+
+  // ---- WiFi ------------------------------------------------------------
+  function renderWifi() {
+    const w = currentConfig.wifi;
+    $("#wifi-hostname").value = w.hostname;
+    $("#wifi-ap-ssid").value = w.ap_ssid;
+    $("#wifi-ap-password").value = w.ap_password;
+    const list = $("#wifi-networks");
+    list.innerHTML = "";
+    for (const [i, net] of w.networks.entries()) {
+      list.appendChild(wifiNetworkRow(i, net));
+    }
+  }
+  function wifiNetworkRow(i, net) {
+    const row = document.createElement("div");
+    row.className = "list-row";
+    row.innerHTML = `
+      <div class="field"><label>SSID</label><input type="text" data-bind="ssid"></div>
+      <div class="field"><label>Password</label><input type="password" autocomplete="off" data-bind="password"></div>
+      <button class="remove" type="button">Remove</button>`;
+    row.querySelector('[data-bind="ssid"]').value = net.ssid;
+    row.querySelector('[data-bind="password"]').value = net.password;
+    row.querySelector(".remove").addEventListener("click", () => {
+      currentConfig.wifi.networks.splice(i, 1);
+      renderWifi();
+    });
+    return row;
+  }
+  $("#wifi-add").addEventListener("click", () => {
+    currentConfig.wifi.networks.push({ ssid: "", password: "" });
+    renderWifi();
   });
+  $("#wifi-save").addEventListener("click", () => {
+    const w = currentConfig.wifi;
+    w.hostname = $("#wifi-hostname").value;
+    w.ap_ssid = $("#wifi-ap-ssid").value;
+    w.ap_password = $("#wifi-ap-password").value;
+    const list = $("#wifi-networks").querySelectorAll(".list-row");
+    w.networks = Array.from(list).map(row => ({
+      ssid: row.querySelector('[data-bind="ssid"]').value,
+      password: row.querySelector('[data-bind="password"]').value,
+    })).filter(n => n.ssid.length > 0);
+    saveConfig("wifi");
+  });
+
+  // ---- MQTT ------------------------------------------------------------
+  function renderMqtt() {
+    const m = currentConfig.mqtt;
+    $("#mqtt-enabled").checked = !!m.enabled;
+    $("#mqtt-broker-url").value = m.broker_url;
+    $("#mqtt-username").value = m.username;
+    $("#mqtt-password").value = m.password;
+    $("#mqtt-base-topic").value = m.base_topic;
+    $("#mqtt-discovery-prefix").value = m.ha_discovery_prefix;
+    $("#mqtt-ca-cert").value = m.ca_cert_pem || "";
+    $("#mqtt-client-cert").value = m.client_cert_pem || "";
+    $("#mqtt-client-key").value = m.client_key_pem || "";
+  }
+  $("#mqtt-save").addEventListener("click", () => {
+    const m = currentConfig.mqtt;
+    m.enabled = $("#mqtt-enabled").checked;
+    m.broker_url = $("#mqtt-broker-url").value.trim();
+    m.username = $("#mqtt-username").value;
+    m.password = $("#mqtt-password").value;
+    m.base_topic = $("#mqtt-base-topic").value.trim();
+    m.ha_discovery_prefix = $("#mqtt-discovery-prefix").value.trim();
+    m.ca_cert_pem = $("#mqtt-ca-cert").value;
+    m.client_cert_pem = $("#mqtt-client-cert").value;
+    m.client_key_pem = $("#mqtt-client-key").value;
+    saveConfig("mqtt");
+  });
+
+  // ---- Schedule --------------------------------------------------------
+  const DOW_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  function renderSchedule() {
+    const sched = currentConfig.schedule.rules;
+    const list = $("#schedule-rules");
+    list.innerHTML = "";
+    for (const [i, rule] of sched.entries()) list.appendChild(scheduleRow(i, rule));
+  }
+  function scheduleRow(i, rule) {
+    const row = document.createElement("div");
+    row.className = "list-row";
+    row.style.flexWrap = "wrap";
+    const action = rule.action.kind === "switch"
+      ? `switch:${rule.action.id}`
+      : `water_control:${rule.action.on ? "on" : "off"}`;
+    row.innerHTML = `
+      <div class="field" style="min-width: 120px;"><label>ID</label>
+        <input type="text" data-bind="id"></div>
+      <div class="field" style="min-width: 200px;"><label>Action</label>
+        <select data-bind="action">
+          <option value="switch:sprinkler_1">Sprinkler 1 on</option>
+          <option value="switch:sprinkler_2">Sprinkler 2 on</option>
+          <option value="water_control:on">Water control ON</option>
+          <option value="water_control:off">Water control OFF</option>
+        </select></div>
+      <div class="field" style="min-width: 80px;"><label>Hours</label>
+        <input type="text" data-bind="hours" placeholder="10,22"></div>
+      <div class="field" style="min-width: 80px;"><label>Minute</label>
+        <input type="text" data-bind="minutes" placeholder="0"></div>
+      <div class="field" style="min-width: 240px;"><label>Days (empty = all)</label>
+        <span data-bind="dow">${DOW_NAMES.map((d, j) => `
+          <label style="margin-right: 6px;">
+            <input type="checkbox" data-dow="${j}"> ${d}
+          </label>`).join("")}</span></div>
+      <div class="field" style="min-width: 80px;"><label>Enabled</label>
+        <input type="checkbox" data-bind="enabled"></div>
+      <button class="remove" type="button">Remove</button>`;
+    row.querySelector('[data-bind="id"]').value = rule.id;
+    row.querySelector('[data-bind="action"]').value = action;
+    row.querySelector('[data-bind="hours"]').value = rule.hours.join(",");
+    row.querySelector('[data-bind="minutes"]').value = rule.minutes.join(",");
+    for (const d of rule.days_of_week) {
+      const cb = row.querySelector(`[data-dow="${d}"]`);
+      if (cb) cb.checked = true;
+    }
+    row.querySelector('[data-bind="enabled"]').checked = rule.enabled;
+    row.querySelector(".remove").addEventListener("click", () => {
+      currentConfig.schedule.rules.splice(i, 1);
+      renderSchedule();
+    });
+    return row;
+  }
+  $("#schedule-add").addEventListener("click", () => {
+    currentConfig.schedule.rules.push({
+      id: `rule_${currentConfig.schedule.rules.length + 1}`,
+      action: { kind: "switch", id: "sprinkler_1" },
+      hours: [10],
+      minutes: [0],
+      days_of_week: [],
+      enabled: true,
+    });
+    renderSchedule();
+  });
+  $("#schedule-save").addEventListener("click", () => {
+    const list = $("#schedule-rules").querySelectorAll(".list-row");
+    currentConfig.schedule.rules = Array.from(list).map(row => {
+      const action = row.querySelector('[data-bind="action"]').value;
+      const [kind, val] = action.split(":");
+      return {
+        id: row.querySelector('[data-bind="id"]').value,
+        action: kind === "switch" ? { kind: "switch", id: val } : { kind: "water_control", on: val === "on" },
+        hours: parseList(row.querySelector('[data-bind="hours"]').value),
+        minutes: parseList(row.querySelector('[data-bind="minutes"]').value),
+        days_of_week: Array.from(row.querySelectorAll('[data-dow]'))
+          .filter(c => c.checked).map(c => +c.dataset.dow),
+        enabled: row.querySelector('[data-bind="enabled"]').checked,
+      };
+    });
+    saveConfig("schedule");
+  });
+  function parseList(s) {
+    return s.split(",").map(x => parseInt(x.trim(), 10)).filter(n => Number.isFinite(n));
+  }
+
+  // ---- Time ------------------------------------------------------------
+  function renderTime() {
+    const sel = $("#tz-name");
+    // Make sure the configured tz is selectable even if we didn't preload it.
+    if (![...sel.options].some(o => o.value === currentConfig.timezone)) {
+      const opt = document.createElement("option");
+      opt.value = currentConfig.timezone;
+      opt.textContent = currentConfig.timezone + " (custom)";
+      sel.appendChild(opt);
+    }
+    sel.value = currentConfig.timezone;
+    $("#sntp-servers").value = currentConfig.sntp_servers.join("\n");
+  }
+  $("#time-save").addEventListener("click", () => {
+    currentConfig.timezone = $("#tz-name").value;
+    currentConfig.sntp_servers = $("#sntp-servers").value.split("\n").map(s => s.trim()).filter(Boolean);
+    saveConfig("time");
+  });
+
+  // ---- Sensors ---------------------------------------------------------
+  function renderSensors() {
+    const s = currentConfig.sensors;
+    renderCalibration("battery", s.battery);
+    renderCalibration("pressure_stage1", s.pressure_stage1);
+    renderCalibration("pressure_stage2", s.pressure_stage2);
+    $("#flow-l-per-pulse").value = s.flow_l_per_pulse;
+    $("#flow-lph-per-pps").value = s.flow_lph_per_pps;
+  }
+  function renderCalibration(key, cal) {
+    const containerId = key === "battery" ? "#cal-battery"
+                      : key === "pressure_stage1" ? "#cal-pressure-1" : "#cal-pressure-2";
+    const c = $(containerId);
+    c.innerHTML = "";
+    for (const [i, [raw, calV]] of cal.points.entries()) {
+      const row = document.createElement("div");
+      row.className = "list-row";
+      row.innerHTML = `
+        <div class="field"><label>Raw</label>
+          <input type="number" step="any" data-cal-raw></div>
+        <div class="field"><label>Calibrated</label>
+          <input type="number" step="any" data-cal-cal></div>
+        <button class="remove" type="button">Remove</button>`;
+      row.querySelector("[data-cal-raw]").value = raw;
+      row.querySelector("[data-cal-cal]").value = calV;
+      row.querySelector(".remove").addEventListener("click", () => {
+        cal.points.splice(i, 1);
+        renderSensors();
+      });
+      c.appendChild(row);
+    }
+  }
+  for (const btn of document.querySelectorAll('button.add-row[data-cal]')) {
+    btn.addEventListener("click", () => {
+      const key = btn.dataset.cal;
+      currentConfig.sensors[key].points.push([0, 0]);
+      renderSensors();
+    });
+  }
+  $("#sensors-save").addEventListener("click", () => {
+    const collect = (sel) => Array.from($(sel).querySelectorAll(".list-row")).map(row => [
+      parseFloat(row.querySelector("[data-cal-raw]").value),
+      parseFloat(row.querySelector("[data-cal-cal]").value),
+    ]);
+    currentConfig.sensors.battery.points = collect("#cal-battery");
+    currentConfig.sensors.pressure_stage1.points = collect("#cal-pressure-1");
+    currentConfig.sensors.pressure_stage2.points = collect("#cal-pressure-2");
+    currentConfig.sensors.flow_l_per_pulse = parseFloat($("#flow-l-per-pulse").value);
+    currentConfig.sensors.flow_lph_per_pps = parseFloat($("#flow-lph-per-pps").value);
+    saveConfig("sensors");
+  });
+
+  // ---- HTTPS -----------------------------------------------------------
+  function renderHttps() {
+    $("#https-cert").value = currentConfig.https.cert_pem;
+    $("#https-key").value = currentConfig.https.key_pem;
+  }
+  $("#https-save").addEventListener("click", () => {
+    currentConfig.https.cert_pem = $("#https-cert").value;
+    currentConfig.https.key_pem = $("#https-key").value;
+    saveConfig("https");
+  });
+
+  // ---- Wireguard -------------------------------------------------------
+  function renderWg() {
+    const w = currentConfig.wireguard;
+    $("#wg-enabled").checked = !!w.enabled;
+    $("#wg-address").value = w.address;
+    $("#wg-keepalive").value = w.keepalive_secs;
+    $("#wg-private-key").value = w.private_key;
+    $("#wg-peer-endpoint").value = w.peer_endpoint;
+    $("#wg-peer-public-key").value = w.peer_public_key;
+    $("#wg-peer-psk").value = w.peer_preshared_key;
+    $("#wg-peer-allowed-ips").value = (w.peer_allowed_ips || []).join("\n");
+  }
+  $("#wg-save").addEventListener("click", () => {
+    const w = currentConfig.wireguard;
+    w.enabled = $("#wg-enabled").checked;
+    w.address = $("#wg-address").value.trim();
+    w.keepalive_secs = parseInt($("#wg-keepalive").value, 10) || 0;
+    w.private_key = $("#wg-private-key").value;
+    w.peer_endpoint = $("#wg-peer-endpoint").value.trim();
+    w.peer_public_key = $("#wg-peer-public-key").value.trim();
+    w.peer_preshared_key = $("#wg-peer-psk").value;
+    w.peer_allowed_ips = $("#wg-peer-allowed-ips").value.split("\n").map(s => s.trim()).filter(Boolean);
+    saveConfig("wg");
+  });
+
+  // ---- Admin token -----------------------------------------------------
+  function renderAuth() {
+    $("#cfg-admin-token").value = currentConfig.admin_token;
+  }
+  $("#auth-save").addEventListener("click", () => {
+    currentConfig.admin_token = $("#cfg-admin-token").value;
+    saveConfig("auth");
+  });
+
+  // ---- Advanced JSON editor -------------------------------------------
+  $("#cfg-reload").addEventListener("click", loadConfig);
+  $("#cfg-save").addEventListener("click", async () => {
+    let parsed;
+    try { parsed = JSON.parse($("#cfg-json").value); }
+    catch (e) { msgErr("#cfg-msg", "invalid JSON: " + e.message); return; }
+    currentConfig = parsed;
+    await saveConfig("cfg");
+    renderAllForms();
+  });
+
+  function renderAllForms() {
+    if (!currentConfig) return;
+    renderWifi(); renderMqtt(); renderSchedule(); renderTime();
+    renderSensors(); renderHttps(); renderWg(); renderAuth();
+  }
 
   $("#ota-upload").addEventListener("click", async () => {
     const file = $("#ota-file").files[0];
