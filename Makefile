@@ -151,6 +151,39 @@ qemu-stop: ## kill any running qemu-system-xtensa instance
 ui-tests: $(PW_SENTINEL) ## Playwright tests in headless chromium against the host build
 	$(PW_VENV)/bin/pytest tests/playwright -v
 
+# -- OTA over the network -------------------------------------------------
+# Iterating on a flashed device: 0.5 s upload + ~3 s reboot, vs. ~10 s for
+# the full serial flash + boot cycle.
+
+APP_BIN := target/firmware/app.bin
+
+.PHONY: app-image
+app-image: ## build app-only OTA image (target/firmware/app.bin)
+	@./scripts/firmware.sh build --release > /dev/null
+	@podman run --rm --userns=keep-id:uid=1000,gid=1000 \
+	    -v $$(pwd):/project:Z \
+	    -w /project/crates/firmware \
+	    docker.io/espressif/idf-rust:esp32_latest \
+	    espflash save-image \
+	        --chip esp32 --flash-size 4mb \
+	        /project/target/firmware/xtensa-esp32-espidf/release/watercontroller-firmware \
+	        /project/$(APP_BIN) > /dev/null
+	@printf "\033[32m✓\033[0m %s ($(shell du -h $(APP_BIN) 2>/dev/null | cut -f1))\n" "$(APP_BIN)"
+
+.PHONY: ota
+ota: app-image ## OTA-flash a running device. Usage: make ota IP=<addr> [TOKEN=<bearer>]
+	@if [ -z "$(IP)" ]; then \
+	    echo "Usage: make ota IP=<device-ip> [TOKEN=<admin-token>]"; \
+	    echo "       TOKEN only needed if Config.admin_token is non-empty."; \
+	    exit 1; \
+	fi
+	@./scripts/ota-flash.sh "$(IP)" "$(APP_BIN)" "$(TOKEN)"
+
+.PHONY: ota-status
+ota-status: ## quick status snapshot. Usage: make ota-status IP=<addr>
+	@if [ -z "$(IP)" ]; then echo "Usage: make ota-status IP=<device-ip>"; exit 1; fi
+	@curl -s --max-time 5 http://$(IP)/api/status | python3 -m json.tool
+
 # -- maintenance -----------------------------------------------------------
 
 .PHONY: clean
