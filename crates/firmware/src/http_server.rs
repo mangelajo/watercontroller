@@ -93,6 +93,14 @@ pub fn spawn(
 ) -> Result<EspHttpServer<'static>> {
     let cfg = esp_idf_svc::http::server::Configuration {
         http_port: port,
+        // Default 6 KiB stack is too tight: PUT /api/config deserialises a
+        // ~1.5 KiB JSON body into the full Config struct (PEM bundles + Vec
+        // of WiFi creds + cal points + …), then calls App::replace_config
+        // which acquires several mutexes in sequence. With 6 KiB the
+        // handler crashed (LoadProhibited, sp at the very bottom of D/IRAM
+        // and 0xcdcd canary leaking into registers). 12 KiB gives ample
+        // headroom and free heap is comfortably above this overhead.
+        stack_size: 12 * 1024,
         ..Default::default()
     };
     // HTTPS support requires CONFIG_ESP_HTTPS_SERVER_ENABLE=y in

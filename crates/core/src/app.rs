@@ -51,9 +51,16 @@ impl App {
         config: Config,
         nvs: Option<Arc<dyn NvsStore>>,
     ) -> Self {
-        // Auto-off durations from the YAML: sprinkler_1 7 min, sprinkler_2 5 min.
-        let s1 = TimedSwitch::new(Some(std::time::Duration::from_secs(7 * 60)));
-        let s2 = TimedSwitch::new(Some(std::time::Duration::from_secs(5 * 60)));
+        // Auto-off durations come from runtime config. 0 = no auto-off.
+        let auto_off_or_none = |secs: u32| {
+            if secs == 0 {
+                None
+            } else {
+                Some(std::time::Duration::from_secs(secs as u64))
+            }
+        };
+        let s1 = TimedSwitch::new(auto_off_or_none(config.switches.sprinkler_1_auto_off_secs));
+        let s2 = TimedSwitch::new(auto_off_or_none(config.switches.sprinkler_2_auto_off_secs));
 
         // Restore last-known valve state from NVS, if available.
         let mut valve = WaterValve::new();
@@ -102,7 +109,21 @@ impl App {
         self.inner.config.lock().unwrap().clone()
     }
 
+    /// Replace the in-memory config and push live-tunable values into the
+    /// running components. Currently: sprinkler auto-off durations on the
+    /// `TimedSwitch`es. Persistence to NVS is the caller's responsibility.
     pub fn replace_config(&self, cfg: Config) {
+        let auto_off_or_none = |secs: u32| {
+            if secs == 0 {
+                None
+            } else {
+                Some(std::time::Duration::from_secs(secs as u64))
+            }
+        };
+        self.inner.sprinkler1.lock().unwrap()
+            .set_auto_off(auto_off_or_none(cfg.switches.sprinkler_1_auto_off_secs));
+        self.inner.sprinkler2.lock().unwrap()
+            .set_auto_off(auto_off_or_none(cfg.switches.sprinkler_2_auto_off_secs));
         *self.inner.config.lock().unwrap() = cfg;
     }
 
@@ -218,6 +239,25 @@ mod tests {
 
         // 8 minutes pass — auto-off (7 min) should fire.
         clock.advance(8 * 60_000);
+        app.tick();
+        assert!(!app.snapshot().switches.sprinkler_1);
+    }
+
+    #[test]
+    fn replace_config_updates_sprinkler_auto_off_live() {
+        let clock = Arc::new(TestClock::new());
+        let app = App::new(clock.clone(), Config::default()); // 7 min default
+        app.switch_command(SwitchCommand::Sprinkler1 { on: true });
+        app.tick();
+        assert!(app.snapshot().switches.sprinkler_1);
+
+        // Live-tighten auto-off to 2 minutes.
+        let mut cfg = app.config();
+        cfg.switches.sprinkler_1_auto_off_secs = 120;
+        app.replace_config(cfg);
+
+        // 3 min in (past the new 2 min window): tick should auto-off.
+        clock.advance(3 * 60_000);
         app.tick();
         assert!(!app.snapshot().switches.sprinkler_1);
     }

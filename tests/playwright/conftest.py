@@ -29,6 +29,7 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+from playwright.sync_api import APIRequestContext, Playwright
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -54,8 +55,17 @@ def _wait_until_listening(host: str, port: int, timeout_s: float = 30.0) -> None
 
 
 @pytest.fixture(scope="session")
-def host_binary() -> Path:
-    """Build and locate the host binary."""
+def real_target_url() -> str | None:
+    """If `WC_TEST_TARGET_URL` is set, run tests against that URL (a real
+    device, typically) instead of spawning the local host binary."""
+    return os.environ.get("WC_TEST_TARGET_URL")
+
+
+@pytest.fixture(scope="session")
+def host_binary(real_target_url) -> Path | None:
+    """Build and locate the host binary. Skipped when targeting a real device."""
+    if real_target_url:
+        return None
     subprocess.check_call(
         ["cargo", "build", "--bin", "host"],
         cwd=REPO_ROOT,
@@ -67,8 +77,13 @@ def host_binary() -> Path:
 
 
 @pytest.fixture(scope="session")
-def host_url(host_binary: Path):
-    """Spawn the host binary, yield its base URL, kill it on teardown."""
+def host_url(host_binary: Path | None, real_target_url: str | None):
+    """Yield a base URL for the SPA. Either:
+      * the local host binary (default), or
+      * `WC_TEST_TARGET_URL` when set (e.g. http://192.168.1.151)."""
+    if real_target_url:
+        yield real_target_url.rstrip("/")
+        return
     port = _free_port()
     bind = f"127.0.0.1:{port}"
     env = {**os.environ, "WC_HOST_BIND": bind, "RUST_LOG": "warn"}
@@ -87,3 +102,12 @@ def host_url(host_binary: Path):
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+@pytest.fixture
+def api_request_context(playwright: Playwright) -> APIRequestContext:
+    """A Playwright APIRequestContext for talking to /api/* directly without
+    a browser page — used for setup/teardown of config and switch state."""
+    ctx = playwright.request.new_context()
+    yield ctx
+    ctx.dispose()

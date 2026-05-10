@@ -159,6 +159,29 @@ pub struct HttpsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SwitchesConfig {
+    /// Auto-off duration for sprinkler_1, in seconds. YAML legacy default
+    /// 7 min. Set to 0 to disable auto-off (manual only — risky for a
+    /// physical sprinkler).
+    #[serde(default = "default_sprinkler_1_auto_off")]
+    pub sprinkler_1_auto_off_secs: u32,
+    /// Auto-off duration for sprinkler_2, in seconds. YAML legacy default 5 min.
+    #[serde(default = "default_sprinkler_2_auto_off")]
+    pub sprinkler_2_auto_off_secs: u32,
+}
+fn default_sprinkler_1_auto_off() -> u32 { 7 * 60 }
+fn default_sprinkler_2_auto_off() -> u32 { 5 * 60 }
+
+impl Default for SwitchesConfig {
+    fn default() -> Self {
+        Self {
+            sprinkler_1_auto_off_secs: default_sprinkler_1_auto_off(),
+            sprinkler_2_auto_off_secs: default_sprinkler_2_auto_off(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default)]
     pub wifi: WifiConfig,
@@ -166,6 +189,8 @@ pub struct Config {
     pub mqtt: MqttConfig,
     #[serde(default)]
     pub https: HttpsConfig,
+    #[serde(default)]
+    pub switches: SwitchesConfig,
     #[serde(default)]
     pub sensors: SensorsConfig,
     #[serde(default = "default_timezone")]
@@ -203,6 +228,7 @@ impl Default for Config {
             wifi: WifiConfig::default(),
             mqtt: MqttConfig::default(),
             https: HttpsConfig::default(),
+            switches: SwitchesConfig::default(),
             sensors: SensorsConfig::default(),
             timezone: default_timezone(),
             sntp_servers: default_sntp_servers(),

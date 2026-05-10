@@ -25,6 +25,14 @@ impl TimedSwitch {
         self.on
     }
 
+    /// Update the auto-off duration. Takes effect on the next `tick`: if the
+    /// switch is already on and the new (shorter) duration has elapsed
+    /// against `on_since`, the next tick will auto-off it; if `None`, the
+    /// switch stays on indefinitely.
+    pub fn set_auto_off(&mut self, auto_off: Option<Duration>) {
+        self.auto_off = auto_off;
+    }
+
     pub fn turn_on(&mut self, now_ms: u64) {
         if !self.on {
             self.on = true;
@@ -89,5 +97,26 @@ mod tests {
         s.turn_on(0);
         s.turn_off(1_000);
         assert!(!s.is_on());
+    }
+
+    #[test]
+    fn set_auto_off_shortens_live_window() {
+        let mut s = TimedSwitch::new(Some(Duration::from_secs(60)));
+        s.turn_on(0);
+        // 4s in, shorten to 3s — next tick should auto-off.
+        s.tick(4_000);
+        assert!(s.is_on());
+        s.set_auto_off(Some(Duration::from_secs(3)));
+        s.tick(4_001);
+        assert!(!s.is_on());
+    }
+
+    #[test]
+    fn set_auto_off_to_none_keeps_switch_on() {
+        let mut s = TimedSwitch::new(Some(Duration::from_secs(5)));
+        s.turn_on(0);
+        s.set_auto_off(None);
+        s.tick(60_000);
+        assert!(s.is_on());
     }
 }
