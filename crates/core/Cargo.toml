@@ -12,8 +12,21 @@ serde_json = { workspace = true }
 # `chrono` with std + alloc + serde (no `clock` feature — time always comes
 # through the Clock trait, never directly from the OS).
 chrono = { version = "0.4", default-features = false, features = ["alloc", "std", "serde"] }
+# Timezone-aware schedule evaluation. `filter-by-regex` keeps only Europe/*
+# zones at compile time so the bundled tzdata stays small (we only need
+# Europe/Madrid for now; users can add more).
+chrono-tz = { version = "0.10", default-features = false, features = ["filter-by-regex"] }
 # Bounded queues / ring buffers without alloc explosion.
 heapless = "0.8"
 
 [dev-dependencies]
 serde_json = { workspace = true }
+
+# chrono-tz filter expression: include only Europe/* zones to limit the
+# bundled tzdata size. Override with --features chrono-tz/filter-by-regex
+# externally if more zones are needed.
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.chrono-tz]
+filter-by-regex = ["^Europe/"]

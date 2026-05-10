@@ -10,7 +10,7 @@
 //! (e.g. an SNTP sync that jumps the clock forward), and avoids double-firing
 //! across normal minute ticks because the interval is exclusive on the left.
 
-use chrono::{Datelike, NaiveDateTime, Weekday};
+use chrono::{DateTime, Datelike, NaiveDateTime, TimeZone, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -122,6 +122,25 @@ fn floor_to_minute(dt: NaiveDateTime) -> NaiveDateTime {
 }
 
 use chrono::Timelike;
+
+/// Convert UTC to the local NaiveDateTime for the configured timezone name
+/// (e.g. "Europe/Madrid"). Falls back to a fixed +01:00 offset on lookup
+/// failure, with a warning logged. Used by the schedule executor.
+pub fn to_local(utc: DateTime<Utc>, tz_name: &str) -> NaiveDateTime {
+    match tz_name.parse::<chrono_tz::Tz>() {
+        Ok(tz) => utc.with_timezone(&tz).naive_local(),
+        Err(_) => {
+            log::warn!(
+                "schedule: unknown timezone '{tz_name}', falling back to UTC+01:00 (no DST)"
+            );
+            let offset = chrono::FixedOffset::east_opt(3600).unwrap();
+            Utc.timestamp_opt(utc.timestamp(), 0)
+                .single()
+                .map(|t| t.with_timezone(&offset).naive_local())
+                .unwrap_or_else(|| utc.naive_utc())
+        }
+    }
+}
 
 /// The default schedule restored from the YAML's commented-out `on_time` block:
 /// at 10:00 and 22:00 turn on sprinkler_1; at 10:30 and 22:30 turn on sprinkler_2.

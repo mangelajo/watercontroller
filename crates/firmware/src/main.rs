@@ -16,7 +16,6 @@ mod qemu_eth;
 mod tee_log;
 
 use anyhow::Result;
-use chrono::{TimeZone, Utc};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
@@ -366,11 +365,11 @@ fn spawn_schedule_task(app: App, clock: Arc<dyn Clock>) {
             // we apply a fixed-offset based on the configured TZ name only
             // for fallback (Europe/Madrid: +01:00 winter / +02:00 summer).
             // Proper TZ resolution lands when chrono-tz is added.
-            let mut last_local = local_now(&*clock);
+            let mut last_local = local_now(&*clock, &app.config().timezone);
             loop {
                 std::thread::sleep(Duration::from_secs(30));
-                let now_local = local_now(&*clock);
                 let cfg = app.config();
+                let now_local = local_now(&*clock, &cfg.timezone);
                 let hits = cfg.schedule.evaluate_range(last_local, now_local);
                 for rule in hits {
                     info!("schedule fire: {} → {:?}", rule.id, rule.action);
@@ -396,17 +395,7 @@ fn spawn_schedule_task(app: App, clock: Arc<dyn Clock>) {
         .ok();
 }
 
-/// Approximate local time using the device's UTC clock + a default
-/// Europe/Madrid offset. Replace with chrono-tz lookup once the dependency
-/// is added (deferred for binary-size reasons in initial bring-up).
-fn local_now(clock: &dyn Clock) -> chrono::NaiveDateTime {
-    let utc = clock.now();
-    // Naïve fixed offset; not DST-correct. Schedules are minute-resolution
-    // and the SNTP-synced UTC clock is authoritative for the time we publish
-    // to MQTT, so a wrong-by-1h schedule fire is noticeable but not damaging.
-    let offset = chrono::FixedOffset::east_opt(3600).unwrap();
-    Utc.timestamp_opt(utc.timestamp(), 0)
-        .single()
-        .map(|t| t.with_timezone(&offset).naive_local())
-        .unwrap_or_else(|| utc.naive_utc())
+/// Local time for the configured timezone (DST-correct via chrono-tz).
+fn local_now(clock: &dyn Clock, tz: &str) -> chrono::NaiveDateTime {
+    watercontroller_core::schedule::to_local(clock.now(), tz)
 }
