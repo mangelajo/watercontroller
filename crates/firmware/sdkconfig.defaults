@@ -12,6 +12,11 @@ CONFIG_LOG_MAXIMUM_LEVEL=5
 # Watchdog: be lenient during early bring-up; tighten later.
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 
+# Main task stack: ESP-IDF default is 3584 B which is tight once we layer
+# WiFi supervisor + HTTPD config + MQTT cert plumbing on top of the Rust
+# panic handler. Bump to 8 KB.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
 # Custom partition table for OTA + NVS + SPA assets. Absolute path in the
 # container is required when sdkconfig.defaults is provided via env var —
 # CMake otherwise resolves the relative path against esp-idf-sys's synthetic
