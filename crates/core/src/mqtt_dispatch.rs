@@ -82,6 +82,18 @@ impl MqttIntegration {
             publish("water_total", format!("{v:.3}"));
         }
 
+        // Diagnostic sensors.
+        if let Some(rssi) = snap.network.wifi_rssi_dbm {
+            publish("wifi_rssi", format!("{rssi}"));
+        }
+        if let Some(heap) = snap.diagnostics.free_heap_bytes {
+            publish("free_heap", format!("{heap}"));
+        }
+        publish("uptime", format!("{}", snap.uptime_ms / 1000));
+        if let Some(reason) = &snap.diagnostics.reset_reason {
+            publish("reset_reason", reason.clone());
+        }
+
         let sw = |key: &str, on: bool| {
             self.mqtt.publish(
                 &ctx.switch_state_topic(key),

@@ -9,8 +9,11 @@ use anyhow::Result;
 use esp_idf_svc::http::server::EspHttpServer;
 use esp_idf_svc::http::Method;
 use esp_idf_svc::io::{EspIOError, Write};
+use std::sync::Arc;
 use watercontroller_core::api::{routes, ApiError, CommandOutcome, ConfigUpdate, SwitchCommand};
 use watercontroller_core::app::App;
+use watercontroller_core::config::Config;
+use watercontroller_core::traits::NvsStore;
 
 const READ_BUF_LEN: usize = 1024;
 const MAX_BODY: usize = 32 * 1024;

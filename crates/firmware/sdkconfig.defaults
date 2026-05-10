@@ -12,10 +12,18 @@ CONFIG_LOG_MAXIMUM_LEVEL=5
 # Watchdog: be lenient during early bring-up; tighten later.
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 
-# Custom partition table for OTA + NVS + SPA assets.
+# Custom partition table for OTA + NVS + SPA assets. Absolute path in the
+# container is required when sdkconfig.defaults is provided via env var —
+# CMake otherwise resolves the relative path against esp-idf-sys's synthetic
+# project dir, where partitions.csv doesn't live.
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="/project/crates/firmware/partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="/project/crates/firmware/partitions.csv"
+
+# 4 MB flash (matches the dev-kit ESP32-WROOM modules).
+CONFIG_ESPTOOLPY_FLASHSIZE_2MB=n
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 
 # OTA — enable rollback on boot failure.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

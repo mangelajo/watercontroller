@@ -15,3 +15,6 @@ ESP_IDF_VERSION = "v5.3.3"
 # Tell esp-idf-sys which crate owns the sdkconfig + ESP-IDF build context.
 # Without this it tries to infer and fails in workspace layouts.
 ESP_IDF_SYS_ROOT_CRATE = "watercontroller-firmware"
+# sdkconfig.defaults is otherwise not picked up reliably from the
+# package metadata in this workspace+container layout. Pin it explicitly.
+ESP_IDF_SDKCONFIG_DEFAULTS = { value = "sdkconfig.defaults", relative = true }

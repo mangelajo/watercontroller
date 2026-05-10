@@ -27,7 +27,16 @@ pub fn router(state: AppState) -> Router {
         .route(routes::CONFIG, get(get_config).put(put_config))
         .route(routes::SWITCH, post(post_switch))
         .route(routes::LOGS_WS, get(ws_logs))
+        .route(routes::FACTORY_RESET, post(post_factory_reset))
         .with_state(Arc::new(state))
+}
+
+async fn post_factory_reset() -> impl IntoResponse {
+    // The host build has no persistent storage to wipe. Return 501 so the
+    // SPA can show "factory reset is firmware-only" cleanly.
+    (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({
+        "message": "factory reset is only implemented on real devices"
+    })))
 }
 
 async fn index() -> impl IntoResponse {

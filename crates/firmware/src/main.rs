@@ -6,6 +6,7 @@ mod hw_nvs;
 mod hw_pcnt;
 mod http_server;
 mod log_telnet;
+mod mdns_init;
 mod mqtt_client;
 mod net_ota;
 mod net_wg;
@@ -119,8 +120,16 @@ fn main() -> Result<()> {
         eth
     };
 
+    let _mdns = match mdns_init::start(&config.wifi.hostname) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            warn!("mdns init failed: {e:?}");
+            None
+        }
+    };
+
     log_telnet::spawn(23);
-    let _httpd = http_server::spawn(app.clone(), 80)?;
+    let _httpd = http_server::spawn(app.clone(), nvs_store.clone(), 80)?;
 
     // Periodic config persistence: save the in-memory config back to NVS once
     // a minute. This catches edits made via PUT /api/config without forcing
@@ -148,16 +157,48 @@ fn main() -> Result<()> {
     }
 
     let started = clock.monotonic_ms();
+    let reset_reason = unsafe { esp_idf_svc::sys::esp_reset_reason() };
+    let reset_reason_str = reset_reason_label(reset_reason);
+    info!("reset reason: {reset_reason_str}");
+
     loop {
         std::thread::sleep(Duration::from_secs(10));
         let uptime_ms = clock.monotonic_ms().saturating_sub(started);
+        let free_heap = unsafe { esp_idf_svc::sys::esp_get_free_heap_size() };
+        let min_free_heap = unsafe { esp_idf_svc::sys::esp_get_minimum_free_heap_size() };
         app.update_state(|s| {
             s.uptime_ms = uptime_ms;
             if s.firmware_version.is_empty() {
                 s.firmware_version = watercontroller_core::version().into();
             }
+            s.diagnostics.free_heap_bytes = Some(free_heap);
+            s.diagnostics.min_free_heap_bytes = Some(min_free_heap);
+            if s.diagnostics.reset_reason.is_none() {
+                s.diagnostics.reset_reason = Some(reset_reason_str.into());
+            }
         });
-        info!("alive (uptime {} ms)", uptime_ms);
+        info!(
+            "alive (uptime {}s, heap free {}B, min {}B)",
+            uptime_ms / 1000, free_heap, min_free_heap
+        );
+    }
+}
+
+fn reset_reason_label(r: esp_idf_svc::sys::esp_reset_reason_t) -> &'static str {
+    use esp_idf_svc::sys::*;
+    #[allow(non_upper_case_globals)]
+    match r {
+        esp_reset_reason_t_ESP_RST_POWERON => "power-on",
+        esp_reset_reason_t_ESP_RST_EXT => "external reset",
+        esp_reset_reason_t_ESP_RST_SW => "software restart",
+        esp_reset_reason_t_ESP_RST_PANIC => "panic / exception",
+        esp_reset_reason_t_ESP_RST_INT_WDT => "interrupt watchdog",
+        esp_reset_reason_t_ESP_RST_TASK_WDT => "task watchdog",
+        esp_reset_reason_t_ESP_RST_WDT => "other watchdog",
+        esp_reset_reason_t_ESP_RST_DEEPSLEEP => "wake from deep sleep",
+        esp_reset_reason_t_ESP_RST_BROWNOUT => "brownout",
+        esp_reset_reason_t_ESP_RST_SDIO => "sdio reset",
+        _ => "unknown",
     }
 }
 
