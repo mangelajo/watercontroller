@@ -22,11 +22,6 @@ heapless = "0.8"
 [dev-dependencies]
 serde_json = { workspace = true }
 
-# chrono-tz filter expression: include only Europe/* zones to limit the
-# bundled tzdata size. Override with --features chrono-tz/filter-by-regex
-# externally if more zones are needed.
-[package.metadata.docs.rs]
-all-features = true
-
-[package.metadata.chrono-tz]
-filter-by-regex = ["^Europe/"]
+# chrono-tz timezone filter is applied via the `CHRONO_TZ_TIMEZONE_FILTER`
+# env var (set in crates/firmware/.cargo/config.toml). The bundled tzdata
+# would otherwise blow past the OTA partition size.

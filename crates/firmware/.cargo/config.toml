@@ -18,3 +18,7 @@ ESP_IDF_SYS_ROOT_CRATE = "watercontroller-firmware"
 # sdkconfig.defaults is otherwise not picked up reliably from the
 # package metadata in this workspace+container layout. Pin it explicitly.
 ESP_IDF_SDKCONFIG_DEFAULTS = { value = "sdkconfig.defaults", relative = true }
+# chrono-tz filter: bundle only Europe/Madrid (and the implicit UTC/GMT)
+# so the tzdata blob fits comfortably in the OTA partition. To use other
+# zones, add their names here (regex) and rebuild.
+CHRONO_TZ_TIMEZONE_FILTER = "Europe/Madrid"
