@@ -1,14 +1,16 @@
-//! mDNS responder — deferred. ESP-IDF's mdns component lives in the IDF
-//! Component Registry (managed_components) rather than in esp-idf-svc by
-//! default; pulling it in via `idf_component.yml` is the right path but
-//! requires a working ETH driver before it's worth wiring.
+//! mDNS responder backed by the espressif/mdns managed component.
 //!
-//! This stub keeps the call site stable so adding mDNS later is a single
-//! file change.
+//! The component dep is currently commented out in
+//! `crates/firmware/Cargo.toml` because pulling it in null-derefs early
+//! in ESP-IDF startup under QEMU. To enable on real hardware:
+//!   1. uncomment the `extra_components` block in
+//!      `[package.metadata.esp-idf-sys]`,
+//!   2. swap this stub for the EspMdns wrapper in the file's git history
+//!      (the call sites already exist).
 
 use anyhow::Result;
 
 pub fn start(hostname: &str) -> Result<()> {
-    log::info!("mdns init: stub (would advertise {hostname}.local)");
+    log::info!("mdns: stub (would advertise {hostname}.local)");
     Ok(())
 }

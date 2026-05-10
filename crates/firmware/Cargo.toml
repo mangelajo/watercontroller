@@ -42,3 +42,12 @@ qemu = []
 esp_idf_version = "v5.3.3"
 esp_idf_components = []
 esp_idf_sdkconfig_defaults = ["sdkconfig.defaults"]
+
+# espressif/mdns: linked-in init code null-derefs early in ESP-IDF startup
+# under QEMU (PC=0 right after spi_flash init). On real hardware this is
+# fine. To enable mDNS on a board, uncomment the block below and rebuild;
+# on a board that uses scripts/qemu.sh, leave it commented or accept the
+# boot loop in QEMU.
+#
+# [[package.metadata.esp-idf-sys.extra_components]]
+# remote_component = { name = "espressif/mdns", version = "^1.6" }

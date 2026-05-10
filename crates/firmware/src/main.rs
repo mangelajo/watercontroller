@@ -1,4 +1,5 @@
 mod assets;
+mod captive_dns;
 mod hw_adc;
 mod hw_clock;
 mod hw_gpio;
@@ -127,6 +128,13 @@ fn main() -> Result<()> {
         );
     }
 
+    // Captive-portal DNS responder runs from boot. The redirect target is
+    // updated by the wifi-mirror task below as state changes (None unless
+    // the device is in AP mode).
+    let captive_redirect: captive_dns::RedirectIp =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    captive_dns::spawn(captive_redirect.clone());
+
     // Bring up WiFi (multi-SSID with AP fallback). The `qemu` feature skips
     // this — qemu doesn't simulate the WiFi peripheral well enough to
     // initialize `EspWifi`. open_eth provides networking instead.
@@ -140,7 +148,7 @@ fn main() -> Result<()> {
             config.wifi.ap_password.clone(),
             config.wifi.networks.clone(),
         )?;
-        spawn_wifi_state_mirror(app.clone(), wifi.clone());
+        spawn_wifi_state_mirror(app.clone(), wifi.clone(), captive_redirect.clone());
 
         // MQTT: connect once WiFi is up. Spawned task waits for STA up and (re)connects
         // to the broker on link recovery, then publishes HA Discovery + retained state.
@@ -389,12 +397,25 @@ fn spawn_mqtt_supervisor(app: App, mqtt: Arc<EspMqtt>, wifi: Arc<WifiSupervisor>
         .ok();
 }
 
-fn spawn_wifi_state_mirror(app: App, wifi: Arc<WifiSupervisor>) {
+fn spawn_wifi_state_mirror(
+    app: App,
+    wifi: Arc<WifiSupervisor>,
+    captive_redirect: captive_dns::RedirectIp,
+) {
     std::thread::Builder::new()
         .name("wifi-mirror".into())
         .stack_size(4 * 1024)
         .spawn(move || loop {
             let st = wifi.state();
+            // Captive DNS only redirects when the device itself is the AP —
+            // never in STA mode (that would hijack legitimate resolution).
+            let new_redirect = match &st {
+                watercontroller_core::traits::WifiState::ApMode { ip, .. } => {
+                    ip.parse().ok()
+                }
+                _ => None,
+            };
+            *captive_redirect.lock().unwrap() = new_redirect;
             app.update_state(|s| s.network.wifi = Some(st.clone()));
             std::thread::sleep(Duration::from_secs(2));
         })

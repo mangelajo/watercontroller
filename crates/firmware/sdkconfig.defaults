@@ -47,6 +47,9 @@ CONFIG_ETH_USE_OPENETH=y
 # WebSocket support in the ESP-IDF HTTP server (used for /ws/logs).
 CONFIG_HTTPD_WS_SUPPORT=y
 
+# mDNS responder so doremorwater.local resolves on the LAN.
+CONFIG_MDNS_MAX_INTERFACES=2
+
 # HTTPS server is OFF by default because:
 #   1. esp_https_server's HTTP-only fallback null-derefs under QEMU (real
 #      hardware likely fine but it's untested by us).

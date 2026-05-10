@@ -22,6 +22,21 @@ use watercontroller_core::traits::NvsStore;
 const READ_BUF_LEN: usize = 1024;
 const MAX_BODY: usize = 32 * 1024;
 
+/// Well-known captive-portal probe URLs that mobile and desktop OSes hit
+/// after joining a new WiFi to decide whether to pop the captive-portal
+/// browser. We don't try to differentiate — every probe gets a 302 to the
+/// SPA root, which is the trigger every OS recognizes.
+const CAPTIVE_PROBE_PATHS: &[&str] = &[
+    "/generate_204",                       // Android (Chrome captive)
+    "/gen_204",                            // older Android
+    "/hotspot-detect.html",                // iOS / macOS
+    "/library/test/success.html",          // legacy Apple
+    "/connecttest.txt",                    // Windows
+    "/ncsi.txt",                           // Windows NCSI
+    "/redirect",                           // Windows fallback
+    "/success.txt",                        // Firefox (network-check)
+];
+
 /// If `app.config().admin_token` is non-empty, require an
 /// `Authorization: Bearer <token>` header. Returns `Ok(())` to proceed,
 /// or writes a 401 response and returns `Err(())` to short-circuit the
@@ -346,6 +361,17 @@ pub fn spawn(
                     crate::net_ota::reboot();
                 })
                 .ok();
+            Ok(())
+        })?;
+    }
+
+    // Captive-portal probe URLs. Phones / OSes hit these well-known paths
+    // when joining a new SSID to detect "is this network captive?". Any 3xx
+    // response triggers the OS captive-portal popup, which then loads our
+    // SPA. We answer all of them with a 302 to the device's root.
+    for path in CAPTIVE_PROBE_PATHS {
+        server.fn_handler::<EspIOError, _>(path, Method::Get, |req| {
+            let _ = req.into_response(302, None, &[("Location", "/")])?;
             Ok(())
         })?;
     }

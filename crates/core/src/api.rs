@@ -60,4 +60,20 @@ pub mod routes {
     /// proceeds with the reboot. Implemented on firmware only — the host build
     /// returns 501 since there's no persistent storage to wipe.
     pub const FACTORY_RESET: &str = "/api/factory_reset";
+    /// GET: trigger a WiFi scan and return the discovered SSIDs. Used by the
+    /// AP-mode setup wizard to populate the network picker.
+    pub const WIFI_SCAN: &str = "/api/wifi/scan";
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WifiScanResult {
+    pub ssid: String,
+    pub rssi_dbm: i8,
+    pub auth: String, // "open" | "wep" | "wpa" | "wpa2" | "wpa3" | "unknown"
+    pub channel: u8,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct WifiScanResponse {
+    pub networks: Vec<WifiScanResult>,
 }
