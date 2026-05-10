@@ -363,6 +363,41 @@ boot.
 the tunnel address (the YAML's `10.6.0.5` is the historical address — keep
 this as the default for continuity).
 
+## QEMU emulation
+
+Espressif's QEMU fork (`docker.io/espressif/qemu` or the prebuilt
+`qemu-xtensa-softmmu-esp_develop_*` tarball) boots the firmware end-to-end
+without hardware. Use `scripts/qemu.sh`:
+
+```sh
+scripts/qemu.sh   # builds release with --features qemu, merges flash, boots
+```
+
+What's verified under QEMU:
+- ESP-IDF bootloader, partition table, OTA-0 selection
+- All ESP-IDF init (heap, spi_flash, NVS, esp_event)
+- Rust `app_main` + tee logger + telnet log server (TCP/23)
+- NVS config load + persistence
+- All HTTPD routes register cleanly
+- Schedule + sensor + tick tasks all spawn
+
+What's **not** verified under QEMU:
+- WiFi (qemu's lwIP shim asserts in `tcpip_send_msg_wait_sem` when
+  `EspWifi::new` registers a netif). The `qemu` Cargo feature gates the
+  WiFi/MQTT supervisors so qemu boots cleanly.
+- Network reachability from the host: lwIP has no netif attached because
+  we don't initialize the OpenCores ETH driver under the `qemu` feature.
+  HTTPD listens on 0.0.0.0:80 inside the guest, but `hostfwd=tcp::18080-:80`
+  has nothing on the guest side to deliver to. Wiring `EspEth` over the
+  ESP32 EMAC to qemu's `open_eth` is the next logical step here, but the
+  driver setup is involved enough that it should be done with hardware to
+  cross-check against.
+- ADC, PCNT, real GPIO behavior.
+
+**Bottom line:** QEMU is a great smoke test for "does it boot, does the
+binary layout fit, do tasks come up". It is **not** a substitute for
+hardware verification of WiFi, sensors, or end-to-end network behavior.
+
 ## Build environment
 
 The firmware crate is built inside the `espressif/idf-rust:esp32_latest`
