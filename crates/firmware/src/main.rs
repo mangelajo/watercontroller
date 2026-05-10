@@ -1,5 +1,6 @@
 mod assets;
 mod captive_dns;
+mod diag;
 mod hw_adc;
 mod hw_clock;
 mod hw_gpio;
@@ -14,7 +15,9 @@ mod net_wg;
 mod net_wifi;
 #[cfg(feature = "qemu")]
 mod qemu_eth;
+mod task_util;
 mod tee_log;
+mod tls_certgen;
 
 use anyhow::Result;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
@@ -103,7 +106,7 @@ fn main() -> Result<()> {
     // Open the "wc" NVS namespace and load runtime config (defaults if absent).
     let nvs = EspNvs::new(nvs_part.clone(), "wc", true)?;
     let nvs_store: Arc<dyn NvsStore> = Arc::new(EspNvsStore::new(nvs));
-    let config = match Config::load(&*nvs_store) {
+    let mut config = match Config::load(&*nvs_store) {
         Ok(c) => {
             info!("config loaded from NVS");
             c
@@ -118,6 +121,39 @@ fn main() -> Result<()> {
             defaults
         }
     };
+
+    // First-boot self-signed cert generation for HTTPS. Skipped if the user
+    // has already pasted their own cert+key via the Settings tab. The
+    // generated PEM blobs are written back to NVS so the cert (and its
+    // public-key fingerprint) stays stable across reboots — important since
+    // browsers cache the per-cert "I trust this self-signed CA" decision.
+    if config.https.cert_pem.is_empty() && config.https.key_pem.is_empty() {
+        let cn = if config.wifi.hostname.is_empty() {
+            "doremorwater".to_string()
+        } else {
+            format!("{}.local", config.wifi.hostname)
+        };
+        info!("https: no cert in config, generating self-signed (CN={cn})");
+        let t0 = std::time::Instant::now();
+        match tls_certgen::generate_self_signed(&cn) {
+            Ok((cert, key)) => {
+                info!(
+                    "https: self-signed cert generated in {} ms ({} B cert, {} B key)",
+                    t0.elapsed().as_millis(),
+                    cert.len(),
+                    key.len(),
+                );
+                config.https.cert_pem = cert;
+                config.https.key_pem = key;
+                if let Err(e) = config.save(&*nvs_store) {
+                    warn!("https: failed to persist generated cert: {e:?}");
+                }
+            }
+            Err(e) => {
+                warn!("https: self-signed cert generation failed: {e:?}");
+            }
+        }
+    }
 
     let clock: Arc<dyn Clock> = Arc::new(EspClock);
     let app = App::with_nvs(clock.clone(), config.clone(), Some(nvs_store.clone()));
@@ -344,10 +380,9 @@ fn spawn_sensor_task<B, P, C>(
 }
 
 fn spawn_mqtt_supervisor(app: App, mqtt: Arc<EspMqtt>, wifi: Arc<WifiSupervisor>) {
-    std::thread::Builder::new()
-        .name("mqtt-sup".into())
-        .stack_size(8 * 1024)
-        .spawn(move || {
+    // 8 KiB ran with only 376 B headroom — mbedTLS handshake during the
+    // initial broker connect is hungry. 12 KiB leaves ~4 KiB margin.
+    task_util::spawn_named(c"mqtt-sup", 12 * 1024, move || {
             use watercontroller_core::traits::WifiState;
             let mut last_attempt: u64 = 0;
             loop {
@@ -393,8 +428,7 @@ fn spawn_mqtt_supervisor(app: App, mqtt: Arc<EspMqtt>, wifi: Arc<WifiSupervisor>
                     }
                 }
             }
-        })
-        .ok();
+    });
 }
 
 fn spawn_wifi_state_mirror(
@@ -402,53 +436,40 @@ fn spawn_wifi_state_mirror(
     wifi: Arc<WifiSupervisor>,
     captive_redirect: captive_dns::RedirectIp,
 ) {
-    std::thread::Builder::new()
-        .name("wifi-mirror".into())
-        .stack_size(4 * 1024)
-        .spawn(move || loop {
-            let st = wifi.state();
-            // Captive DNS only redirects when the device itself is the AP —
-            // never in STA mode (that would hijack legitimate resolution).
-            let new_redirect = match &st {
-                watercontroller_core::traits::WifiState::ApMode { ip, .. } => {
-                    ip.parse().ok()
-                }
-                _ => None,
-            };
-            *captive_redirect.lock().unwrap() = new_redirect;
-            app.update_state(|s| s.network.wifi = Some(st.clone()));
-            std::thread::sleep(Duration::from_secs(2));
-        })
-        .ok();
+    task_util::spawn_named(c"wifi-mirror", 4 * 1024, move || loop {
+        let st = wifi.state();
+        // Captive DNS only redirects when the device itself is the AP —
+        // never in STA mode (that would hijack legitimate resolution).
+        let new_redirect = match &st {
+            watercontroller_core::traits::WifiState::ApMode { ip, .. } => ip.parse().ok(),
+            _ => None,
+        };
+        *captive_redirect.lock().unwrap() = new_redirect;
+        app.update_state(|s| s.network.wifi = Some(st.clone()));
+        std::thread::sleep(Duration::from_secs(2));
+    });
 }
 
 fn spawn_config_persist(app: App, nvs: Arc<dyn NvsStore>) {
-    std::thread::Builder::new()
-        .name("config-persist".into())
-        .stack_size(8 * 1024)
-        .spawn(move || {
-            let mut last_saved_json = serde_json::to_vec(&app.config()).unwrap_or_default();
-            loop {
-                std::thread::sleep(Duration::from_secs(60));
-                let cfg_json = serde_json::to_vec(&app.config()).unwrap_or_default();
-                if cfg_json != last_saved_json {
-                    if let Err(e) = app.config().save(&*nvs) {
-                        warn!("nvs save failed: {e:?}");
-                    } else {
-                        info!("config persisted to NVS ({} bytes)", cfg_json.len());
-                        last_saved_json = cfg_json;
-                    }
+    task_util::spawn_named(c"cfg-persist", 8 * 1024, move || {
+        let mut last_saved_json = serde_json::to_vec(&app.config()).unwrap_or_default();
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+            let cfg_json = serde_json::to_vec(&app.config()).unwrap_or_default();
+            if cfg_json != last_saved_json {
+                if let Err(e) = app.config().save(&*nvs) {
+                    warn!("nvs save failed: {e:?}");
+                } else {
+                    info!("config persisted to NVS ({} bytes)", cfg_json.len());
+                    last_saved_json = cfg_json;
                 }
             }
-        })
-        .ok();
+        }
+    });
 }
 
 fn spawn_schedule_task(app: App, clock: Arc<dyn Clock>) {
-    std::thread::Builder::new()
-        .name("schedule".into())
-        .stack_size(8 * 1024)
-        .spawn(move || {
+    task_util::spawn_named(c"schedule", 8 * 1024, move || {
             // Evaluator works in *local* time. SNTP sets the system TZ via
             // CONFIG_NEWLIB_LIBC_TZ_BUILTIN; chrono::Utc::now() returns UTC,
             // we apply a fixed-offset based on the configured TZ name only
@@ -480,8 +501,7 @@ fn spawn_schedule_task(app: App, clock: Arc<dyn Clock>) {
                 }
                 last_local = now_local;
             }
-        })
-        .ok();
+    });
 }
 
 /// Local time for the configured timezone (DST-correct via chrono-tz).

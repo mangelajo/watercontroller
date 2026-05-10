@@ -52,14 +52,16 @@ async fn get_status(State(s): State<Arc<AppState>>) -> Json<watercontroller_core
 }
 
 async fn get_config(State(s): State<Arc<AppState>>) -> Json<watercontroller_core::config::Config> {
-    Json(s.app.config())
+    Json(s.app.config().redact_secrets_for_api())
 }
 
 async fn put_config(
     State(s): State<Arc<AppState>>,
     Json(update): Json<ConfigUpdate>,
 ) -> impl IntoResponse {
-    s.app.replace_config(update.0);
+    let mut current = s.app.config();
+    current.merge_preserving_secrets(update.0);
+    s.app.replace_config(current);
     StatusCode::NO_CONTENT
 }
 

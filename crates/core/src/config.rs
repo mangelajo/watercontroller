@@ -289,6 +289,68 @@ impl Config {
         nvs.remove(NVS_KEY)?;
         Ok(())
     }
+
+    /// Return a clone with every sensitive field blanked, suitable for
+    /// `GET /api/config`. Public certs (cert_pem, peer_public_key,
+    /// ca_cert_pem) are kept — they're not secrets and the UI shows them so
+    /// users can verify what's installed.
+    pub fn redact_secrets_for_api(&self) -> Self {
+        let mut out = self.clone();
+        for net in out.wifi.networks.iter_mut() {
+            net.password.clear();
+        }
+        out.mqtt.password.clear();
+        out.mqtt.client_key_pem.clear();
+        out.https.key_pem.clear();
+        out.wireguard.private_key.clear();
+        out.wireguard.peer_preshared_key.clear();
+        out.admin_token.clear();
+        out
+    }
+
+    /// Apply an incoming config update from the API while preserving stored
+    /// secrets that came back empty (because [`Self::redact_secrets_for_api`]
+    /// blanks them on the way out). Per field:
+    ///
+    ///   - WiFi network passwords: matched by SSID. Empty incoming password
+    ///     + matching stored SSID → keep stored. New SSIDs with empty
+    ///     passwords pass through (legitimate intent: open network).
+    ///   - All other secrets (mqtt password / client key, https key,
+    ///     wireguard keys, admin token): empty in incoming → keep stored;
+    ///     non-empty in incoming → overwrite.
+    pub fn merge_preserving_secrets(&mut self, mut incoming: Self) {
+        for net in incoming.wifi.networks.iter_mut() {
+            if net.password.is_empty() {
+                if let Some(existing) = self
+                    .wifi
+                    .networks
+                    .iter()
+                    .find(|n| n.ssid == net.ssid)
+                {
+                    net.password = existing.password.clone();
+                }
+            }
+        }
+        if incoming.mqtt.password.is_empty() {
+            incoming.mqtt.password = self.mqtt.password.clone();
+        }
+        if incoming.mqtt.client_key_pem.is_empty() {
+            incoming.mqtt.client_key_pem = self.mqtt.client_key_pem.clone();
+        }
+        if incoming.https.key_pem.is_empty() {
+            incoming.https.key_pem = self.https.key_pem.clone();
+        }
+        if incoming.wireguard.private_key.is_empty() {
+            incoming.wireguard.private_key = self.wireguard.private_key.clone();
+        }
+        if incoming.wireguard.peer_preshared_key.is_empty() {
+            incoming.wireguard.peer_preshared_key = self.wireguard.peer_preshared_key.clone();
+        }
+        if incoming.admin_token.is_empty() {
+            incoming.admin_token = self.admin_token.clone();
+        }
+        *self = incoming;
+    }
 }
 
 #[cfg(test)]
@@ -334,5 +396,90 @@ mod tests {
         let cfg = Config::load(&nvs).unwrap();
         assert_eq!(cfg.timezone, "UTC");
         assert_eq!(cfg.sensors, SensorsConfig::default());
+    }
+
+    fn cfg_with_secrets() -> Config {
+        let mut c = Config::default();
+        c.wifi.networks = vec![
+            WifiCreds { ssid: "home".into(), password: "wifi-secret".into() },
+            WifiCreds { ssid: "guest".into(), password: "guest-secret".into() },
+        ];
+        c.mqtt.password = "mqtt-secret".into();
+        c.mqtt.client_key_pem = "-----BEGIN MQTT KEY-----".into();
+        c.https.key_pem = "-----BEGIN HTTPS KEY-----".into();
+        c.wireguard.private_key = "wg-private".into();
+        c.wireguard.peer_preshared_key = "wg-psk".into();
+        c.admin_token = "admin-bearer".into();
+        c
+    }
+
+    #[test]
+    fn redact_blanks_every_secret() {
+        let r = cfg_with_secrets().redact_secrets_for_api();
+        assert!(r.wifi.networks.iter().all(|n| n.password.is_empty()));
+        assert_eq!(r.mqtt.password, "");
+        assert_eq!(r.mqtt.client_key_pem, "");
+        assert_eq!(r.https.key_pem, "");
+        assert_eq!(r.wireguard.private_key, "");
+        assert_eq!(r.wireguard.peer_preshared_key, "");
+        assert_eq!(r.admin_token, "");
+    }
+
+    #[test]
+    fn redact_keeps_public_certs_and_ssids() {
+        let mut c = cfg_with_secrets();
+        c.https.cert_pem = "-----BEGIN HTTPS CERT-----".into();
+        c.mqtt.ca_cert_pem = "-----BEGIN CA-----".into();
+        c.wireguard.peer_public_key = "wg-pub".into();
+        let r = c.redact_secrets_for_api();
+        assert_eq!(r.wifi.networks[0].ssid, "home");
+        assert_eq!(r.https.cert_pem, "-----BEGIN HTTPS CERT-----");
+        assert_eq!(r.mqtt.ca_cert_pem, "-----BEGIN CA-----");
+        assert_eq!(r.wireguard.peer_public_key, "wg-pub");
+    }
+
+    #[test]
+    fn merge_preserves_empty_secrets_from_redacted_round_trip() {
+        let mut stored = cfg_with_secrets();
+        // Simulate: SPA fetched redacted view, user changed one non-secret
+        // field, posted back. All secrets in incoming are empty.
+        let mut incoming = stored.redact_secrets_for_api();
+        incoming.timezone = "UTC".into();
+        stored.merge_preserving_secrets(incoming);
+        assert_eq!(stored.timezone, "UTC");
+        assert_eq!(stored.https.key_pem, "-----BEGIN HTTPS KEY-----");
+        assert_eq!(stored.mqtt.password, "mqtt-secret");
+        assert_eq!(stored.admin_token, "admin-bearer");
+        assert_eq!(stored.wifi.networks[0].password, "wifi-secret");
+        assert_eq!(stored.wifi.networks[1].password, "guest-secret");
+    }
+
+    #[test]
+    fn merge_overwrites_when_incoming_provides_new_secret() {
+        let mut stored = cfg_with_secrets();
+        let mut incoming = stored.redact_secrets_for_api();
+        incoming.https.key_pem = "-----BEGIN NEW HTTPS KEY-----".into();
+        incoming.admin_token = "rotated".into();
+        stored.merge_preserving_secrets(incoming);
+        assert_eq!(stored.https.key_pem, "-----BEGIN NEW HTTPS KEY-----");
+        assert_eq!(stored.admin_token, "rotated");
+        // Untouched secrets still preserved.
+        assert_eq!(stored.mqtt.password, "mqtt-secret");
+    }
+
+    #[test]
+    fn merge_wifi_password_match_by_ssid() {
+        let mut stored = cfg_with_secrets();
+        // User reordered networks and added a new open one.
+        let mut incoming = stored.redact_secrets_for_api();
+        incoming.wifi.networks = vec![
+            WifiCreds { ssid: "guest".into(), password: "".into() },
+            WifiCreds { ssid: "home".into(), password: "".into() },
+            WifiCreds { ssid: "openCafe".into(), password: "".into() }, // new
+        ];
+        stored.merge_preserving_secrets(incoming);
+        assert_eq!(stored.wifi.networks[0].password, "guest-secret");
+        assert_eq!(stored.wifi.networks[1].password, "wifi-secret");
+        assert_eq!(stored.wifi.networks[2].password, ""); // new + open, kept empty
     }
 }

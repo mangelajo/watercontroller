@@ -51,15 +51,14 @@ impl WifiSupervisor {
         });
 
         let s = supervisor.clone();
-        thread::Builder::new()
-            .name("wifi-supervisor".into())
-            .stack_size(12 * 1024)
-            .spawn(move || {
-                if let Err(e) = run(s, modem, sys_loop, nvs) {
-                    log::error!("wifi supervisor terminated: {e:?}");
-                }
-            })
-            .ok();
+        // 12 KiB ran with only 176 B headroom on /api/diag — too close to
+        // overflow for an event-driven supervisor whose callbacks can chain
+        // surprisingly deep. 16 KiB gives ~4 KiB margin.
+        crate::task_util::spawn_named(c"wifi-sup", 16 * 1024, move || {
+            if let Err(e) = run(s, modem, sys_loop, nvs) {
+                log::error!("wifi supervisor terminated: {e:?}");
+            }
+        });
 
         Ok(supervisor)
     }

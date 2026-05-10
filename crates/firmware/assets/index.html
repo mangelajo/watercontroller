@@ -213,6 +213,48 @@
     padding: 14px; font-size: 12px;
     border-top: 1px solid var(--border); background: var(--panel);
   }
+
+  /* Loading modal — shown during async fetches that would otherwise leave
+     forms looking empty (the device's TLS handshake on first request can
+     take a couple of seconds). */
+  .loading-modal {
+    position: fixed; inset: 0; z-index: 1000;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(31, 35, 40, 0.35);
+    backdrop-filter: blur(2px);
+  }
+  .loading-modal[hidden] { display: none; }
+  .loading-modal-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 28px;
+    display: flex; align-items: center; gap: 14px;
+    color: var(--accent);
+    box-shadow: 0 8px 32px rgba(31, 35, 40, 0.18);
+    font-size: 14px; font-weight: 500;
+  }
+  .clock-spinner { display: block; color: var(--accent); }
+  .clock-spinner .clock-min  { transform-origin: 32px 32px; animation: clock-min 4s linear infinite; }
+  .clock-spinner .clock-hour { transform-origin: 32px 32px; animation: clock-hour 48s linear infinite; }
+  @keyframes clock-min  { to { transform: rotate(360deg); } }
+  @keyframes clock-hour { to { transform: rotate(360deg); } }
+
+  /* Diagnostics card */
+  .diag-val { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+              font-size: 14px; }
+  table.diag-tasks { width: 100%; border-collapse: collapse;
+                     font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  table.diag-tasks th, table.diag-tasks td {
+    padding: 4px 8px; border-bottom: 1px solid var(--border);
+  }
+  table.diag-tasks th { text-align: right; color: var(--muted);
+                        font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; font-size: 11px; }
+  table.diag-tasks td { text-align: right; font-variant-numeric: tabular-nums; }
+  table.diag-tasks td:first-child, table.diag-tasks th:first-child { text-align: left; }
+  /* Highlight tasks with little stack headroom. */
+  table.diag-tasks tr.warn td { background: #fff8c5; }
+  table.diag-tasks tr.bad  td { background: #ffe5e5; color: var(--bad); }
 </style>
 </head>
 <body>
@@ -228,7 +270,6 @@
 
   <nav class="tabs" id="tabnav">
     <button data-tab="dashboard" class="active">Dashboard</button>
-    <button data-tab="logs">Logs</button>
     <button data-tab="wifi">WiFi</button>
     <button data-tab="sprinklers">Sprinklers</button>
     <button data-tab="schedule">Schedule</button>
@@ -240,6 +281,7 @@
     <button data-tab="auth">Auth</button>
     <button data-tab="ota">OTA</button>
     <button data-tab="advanced">Advanced</button>
+    <button data-tab="logs">Logs</button>
   </nav>
 
   <main>
@@ -299,14 +341,6 @@
           </div>
         </section>
       </div>
-    </section>
-
-    <!-- ====== Logs ====== -->
-    <section id="logs" class="tab">
-      <section class="card full">
-        <h2>Live device logs</h2>
-        <pre class="logs" id="logs-pane"></pre>
-      </section>
     </section>
 
     <!-- ====== WiFi ====== -->
@@ -589,10 +623,63 @@
           <span class="status-msg" id="reset-msg"></span>
         </div>
       </section>
+      <section class="card full">
+        <h2>Diagnostics (auto-refresh)</h2>
+        <p class="status-msg">Live heap and per-task stack high-water marks from
+          <code>/api/diag</code>. Refreshes every 3 seconds while this tab is open.
+          Useful for spotting memory pressure (low <em>min ever free</em>) or tasks
+          dangerously close to overflowing their stack (low <em>stack free</em>).</p>
+        <div class="grid2" id="diag-heap">
+          <div class="field"><label>Heap free</label><span class="diag-val" id="diag-free">—</span></div>
+          <div class="field"><label>Largest free block</label><span class="diag-val" id="diag-largest">—</span></div>
+          <div class="field"><label>Min ever free (since boot)</label><span class="diag-val" id="diag-min">—</span></div>
+          <div class="field"><label>Total allocated</label><span class="diag-val" id="diag-alloc">—</span></div>
+        </div>
+        <table class="diag-tasks" id="diag-tasks-table" style="margin-top: 12px;">
+          <thead>
+            <tr>
+              <th style="text-align:left;">Task</th>
+              <th>State</th>
+              <th>Pri</th>
+              <th>Stack free (B)</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+    </section>
+  </main>
+
+  <!-- Logs intentionally last so it sits at the end of the tab strip. -->
+  <main>
+    <section id="logs" class="tab">
+      <section class="card full">
+        <h2>Live device logs</h2>
+        <pre class="logs" id="logs-pane"></pre>
+      </section>
     </section>
   </main>
 
   <footer>doremorwater · <span id="uptime">—</span></footer>
+
+  <div id="loading-modal" class="loading-modal" hidden>
+    <div class="loading-modal-card">
+      <svg class="clock-spinner" viewBox="0 0 64 64" width="40" height="40" aria-hidden="true">
+        <circle cx="32" cy="32" r="28" fill="none" stroke="currentColor" stroke-width="3" opacity="0.25"/>
+        <!-- 12 hour ticks -->
+        <g stroke="currentColor" stroke-width="2" opacity="0.45">
+          <line x1="32" y1="6"  x2="32" y2="10"/>
+          <line x1="32" y1="58" x2="32" y2="54"/>
+          <line x1="6"  y1="32" x2="10" y2="32"/>
+          <line x1="58" y1="32" x2="54" y2="32"/>
+        </g>
+        <line class="clock-hour" x1="32" y1="32" x2="32" y2="20" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"/>
+        <line class="clock-min"  x1="32" y1="32" x2="32" y2="14" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+        <circle cx="32" cy="32" r="2" fill="currentColor"/>
+      </svg>
+      <span id="loading-modal-text">Loading…</span>
+    </div>
+  </div>
 
 <script>
   const $ = s => document.querySelector(s);
@@ -711,6 +798,16 @@
         : (key === "sprinkler_1"
             ? { kind: "sprinkler1", on: !isOn }
             : { kind: "sprinkler2", on: !isOn });
+      // Optimistic UI: water_control always sequences (~16 s), so show busy
+      // immediately. Sprinklers toggle instantly. Reduces "click feels dead"
+      // and side-steps a race where the immediate /api/status refresh below
+      // can land before the firmware tick has propagated the new valve
+      // state into the snapshot.
+      if (key === "water_control") {
+        setToggle($(elId), "transitioning");
+      } else {
+        setToggle($(elId), isOn ? "off" : "on");
+      }
       try {
         const r = await fetch("/api/switch", {
           method: "POST",
@@ -741,7 +838,48 @@
         "https","vpn","auth","advanced",
       ]);
       if (SETTINGS_TABS.has(tab) && !currentConfig) loadConfig();
+      setDiagPolling(tab === "advanced");
     });
+  }
+
+  // ---- Diagnostics (Advanced tab) ----
+  // Polls /api/diag every 3 s, but ONLY while the Advanced tab is open —
+  // otherwise we'd be hammering the device for nothing.
+  let diagTimer = null;
+  function setDiagPolling(on) {
+    if (on && !diagTimer) {
+      refreshDiag();
+      diagTimer = setInterval(refreshDiag, 3000);
+    } else if (!on && diagTimer) {
+      clearInterval(diagTimer); diagTimer = null;
+    }
+  }
+  async function refreshDiag() {
+    try {
+      const r = await fetch("/api/diag");
+      if (!r.ok) return;
+      const d = await r.json();
+      const fmt = n => n.toLocaleString();
+      $("#diag-free").textContent    = fmt(d.heap.total_free_bytes) + " B";
+      $("#diag-largest").textContent = fmt(d.heap.largest_free_block) + " B";
+      $("#diag-min").textContent     = fmt(d.heap.min_ever_free_bytes) + " B";
+      $("#diag-alloc").textContent   = fmt(d.heap.total_allocated_bytes) + " B";
+      const tbody = $("#diag-tasks-table tbody");
+      // Sort by stack_min_free ascending so the riskiest tasks float to the top.
+      const tasks = [...d.tasks].sort((a, b) => a.stack_min_free_bytes - b.stack_min_free_bytes);
+      tbody.innerHTML = "";
+      for (const t of tasks) {
+        const tr = document.createElement("tr");
+        // <512 B free is "bad" (one mbedTLS chain push could overflow);
+        // <1024 B is "warn"; otherwise OK.
+        if (t.stack_min_free_bytes < 512) tr.className = "bad";
+        else if (t.stack_min_free_bytes < 1024) tr.className = "warn";
+        tr.innerHTML = `<td>${t.name}</td><td>${t.state}</td><td>${t.priority}</td><td>${fmt(t.stack_min_free_bytes)}</td>`;
+        tbody.appendChild(tr);
+      }
+    } catch (e) {
+      // Silent — Advanced tab will just show stale numbers if a request times out.
+    }
   }
 
   // ---- Logs (WebSocket) ----
@@ -767,10 +905,24 @@
   refreshStatus();
   setInterval(refreshStatus, 2000);
 
+  // ---- Loading modal ----
+  // Shown while a fetch that populates a whole tab is in flight, so the
+  // user doesn't see a flash of empty form fields. The first /api/config
+  // hit on a freshly-booted device can take 1-2 s because it forces a
+  // TLS handshake; without feedback that looks like the SPA is broken.
+  function showLoading(text) {
+    if (text) $("#loading-modal-text").textContent = text;
+    $("#loading-modal").hidden = false;
+  }
+  function hideLoading() {
+    $("#loading-modal").hidden = true;
+  }
+
   // ---- Config (forms) ----
   let currentConfig = null;
 
   async function loadConfig() {
+    showLoading("Loading config…");
     try {
       const r = await fetch("/api/config");
       if (!r.ok) throw new Error("HTTP " + r.status);
@@ -780,6 +932,8 @@
       msgOk("#cfg-msg", "loaded");
     } catch (e) {
       msgErr("#cfg-msg", "load failed: " + e.message);
+    } finally {
+      hideLoading();
     }
   }
   async function saveConfig(section) {

@@ -81,47 +81,109 @@ fn write_unauthorized(
 const JSON_CT: &[(&str, &str)] = &[("Content-Type", "application/json")];
 const HTML_CT: &[(&str, &str)] = &[("Content-Type", "text/html; charset=utf-8")];
 
-/// Spawn the HTTPD. If `cert_pem` and `key_pem` are both non-empty, an
-/// HTTPS listener on port 443 is started in addition to plain HTTP on
-/// `port`. Empty cert/key = HTTP only.
+/// Default 6 KiB HTTPD task stack overflowed under PUT /api/config (full
+/// Config deserialisation + multiple mutex acquisitions). 12 KiB plain,
+/// 16 KiB for TLS (mbedTLS handshake chews a lot of stack).
+const HTTP_STACK: usize = 12 * 1024;
+const HTTPS_STACK: usize = 16 * 1024;
+
+/// Two server handles — one plain on :80, an optional TLS one on :443. The
+/// caller must hold this for the lifetime of the device; dropping shuts the
+/// listeners down.
+pub struct ServerHandles {
+    #[allow(dead_code)]
+    pub http: EspHttpServer<'static>,
+    #[cfg(esp_idf_esp_https_server_enable)]
+    #[allow(dead_code)]
+    pub https: Option<EspHttpServer<'static>>,
+}
+
+/// Spawn the HTTPD. Always starts plain HTTP on `port`. When `cert_pem` +
+/// `key_pem` are both non-empty (and the firmware was built with
+/// `CONFIG_ESP_HTTPS_SERVER_ENABLE=y`), additionally starts an HTTPS
+/// listener on port 443.
 pub fn spawn(
     app: App,
     nvs: Arc<dyn NvsStore>,
     port: u16,
     cert_pem: &str,
     key_pem: &str,
-) -> Result<EspHttpServer<'static>> {
-    let cfg = esp_idf_svc::http::server::Configuration {
+) -> Result<ServerHandles> {
+    // Shared WS-fanout sender list — populated by both servers' WS handlers,
+    // drained by a single fanout thread spawned at the end of this fn.
+    let ws_senders: Arc<Mutex<Vec<EspHttpWsDetachedSender>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Plain HTTP on `port`.
+    let http_cfg = esp_idf_svc::http::server::Configuration {
         http_port: port,
-        // Default 6 KiB stack is too tight: PUT /api/config deserialises a
-        // ~1.5 KiB JSON body into the full Config struct (PEM bundles + Vec
-        // of WiFi creds + cal points + …), then calls App::replace_config
-        // which acquires several mutexes in sequence. With 6 KiB the
-        // handler crashed (LoadProhibited, sp at the very bottom of D/IRAM
-        // and 0xcdcd canary leaking into registers). 12 KiB gives ample
-        // headroom and free heap is comfortably above this overhead.
-        stack_size: 12 * 1024,
+        stack_size: HTTP_STACK,
         ..Default::default()
     };
-    // HTTPS support requires CONFIG_ESP_HTTPS_SERVER_ENABLE=y in
-    // sdkconfig.defaults — see the comment in that file. When enabled, the
-    // following block plugs the configured PEM bundle into the server.
+    let mut http = EspHttpServer::new(&http_cfg)?;
+    register_handlers(&mut http, app.clone(), nvs.clone(), ws_senders.clone())?;
+    log::info!("http: listening on :{port}");
+
+    // HTTPS on :443 when both PEM blobs are present and the component is
+    // compiled in.
     #[cfg(esp_idf_esp_https_server_enable)]
-    let cfg = {
-        let mut cfg = cfg;
-        if !cert_pem.is_empty() && !key_pem.is_empty() {
-            log::info!("https: cert/key present, enabling :443 alongside :{port}");
-            cfg.server_certificate = Some(esp_idf_svc::tls::X509::pem(leak_cstr(cert_pem)));
-            cfg.private_key = Some(esp_idf_svc::tls::X509::pem(leak_cstr(key_pem)));
-            cfg.https_port = 443;
-        } else {
-            log::info!("https: no cert/key configured, plain HTTP only on :{port}");
+    let https = if !cert_pem.is_empty() && !key_pem.is_empty() {
+        // TLS server's parallel-session cap. Browsers (Chromium) speculatively
+        // pre-connect with multiple TCP/TLS sessions; with cap=2 they queued
+        // behind each other and the SPA load felt sluggish. 4 matches the
+        // browser's typical inflight count for an origin and the heap budget
+        // (with MBEDTLS_DYNAMIC_BUFFER each idle session is small; only
+        // active handshakes burst ~12 KiB).
+        let mut tls_cfg = esp_idf_svc::http::server::Configuration {
+            http_port: port,
+            https_port: 443,
+            stack_size: HTTPS_STACK,
+            max_open_sockets: 4,
+            // The plain server already grabbed the default ctrl_port
+            // (32768). esp_https_server uses ctrl_port for an internal
+            // signaling socket; running two servers in the same process
+            // requires two distinct ports here, otherwise httpd_ssl_start
+            // returns ESP_FAIL.
+            ctrl_port: 32769,
+            ..Default::default()
+        };
+        tls_cfg.server_certificate = Some(esp_idf_svc::tls::X509::pem(leak_cstr(cert_pem)));
+        tls_cfg.private_key = Some(esp_idf_svc::tls::X509::pem(leak_cstr(key_pem)));
+        match EspHttpServer::new(&tls_cfg) {
+            Ok(mut s) => {
+                register_handlers(&mut s, app.clone(), nvs.clone(), ws_senders.clone())?;
+                log::info!("https: listening on :443 (TLS)");
+                Some(s)
+            }
+            Err(e) => {
+                log::error!("https: failed to start TLS server, continuing HTTP-only: {e}");
+                None
+            }
         }
-        cfg
+    } else {
+        log::info!("https: no cert/key configured, HTTP-only on :{port}");
+        None
     };
     #[cfg(not(esp_idf_esp_https_server_enable))]
     let _ = (cert_pem, key_pem);
-    let mut server = EspHttpServer::new(&cfg)?;
+
+    // Single fan-out thread shared across both servers' WS handlers.
+    spawn_ws_fanout(ws_senders);
+
+    Ok(ServerHandles {
+        http,
+        #[cfg(esp_idf_esp_https_server_enable)]
+        https,
+    })
+}
+
+/// Register every URI handler on the given server. Called once per
+/// `EspHttpServer` instance (HTTP and, when present, HTTPS).
+fn register_handlers(
+    server: &mut EspHttpServer<'static>,
+    app: App,
+    nvs: Arc<dyn NvsStore>,
+    ws_senders: Arc<Mutex<Vec<EspHttpWsDetachedSender>>>,
+) -> Result<()> {
 
     server.fn_handler::<EspIOError, _>("/", Method::Get, |req| {
         let mut resp = req.into_response(200, None, HTML_CT)?;
@@ -142,12 +204,25 @@ pub fn spawn(
     {
         let app = app.clone();
         server.fn_handler::<EspIOError, _>(routes::CONFIG, Method::Get, move |req| {
-            let body = serde_json::to_vec(&app.config()).unwrap_or_default();
+            // Strip secrets before serialising — the SPA only needs to see
+            // public fields. PUT path uses `merge_preserving_secrets` to
+            // avoid wiping stored values when the form posts blanks back.
+            let body = serde_json::to_vec(&app.config().redact_secrets_for_api())
+                .unwrap_or_default();
             let mut resp = req.into_response(200, None, JSON_CT)?;
             resp.write_all(&body)?;
             Ok(())
         })?;
     }
+
+    // GET /api/diag → heap + per-task stack high-water marks. Read-only,
+    // unauthenticated (it's already exposed implicitly via /api/status).
+    server.fn_handler::<EspIOError, _>("/api/diag", Method::Get, |req| {
+        let body = serde_json::to_vec(&crate::diag::snapshot()).unwrap_or_default();
+        let mut resp = req.into_response(200, None, JSON_CT)?;
+        resp.write_all(&body)?;
+        Ok(())
+    })?;
 
     {
         let app = app.clone();
@@ -172,7 +247,13 @@ pub fn spawn(
             }
             match serde_json::from_slice::<ConfigUpdate>(&buf) {
                 Ok(u) => {
-                    app.replace_config(u.0);
+                    // Merge so empty secret fields in the incoming PUT keep
+                    // the stored value (the SPA gets a redacted view on
+                    // GET, so blank password / key fields in the form are
+                    // the default state, not an explicit clear).
+                    let mut current = app.config();
+                    current.merge_preserving_secrets(u.0);
+                    app.replace_config(current);
                     let _ = req.into_response(204, None, &[])?;
                 }
                 Err(e) => {
@@ -225,17 +306,14 @@ pub fn spawn(
     }
 
     // GET /ws/logs → live log streaming via WebSocket. The handler stores a
-    // `EspHttpWsDetachedSender` for each new session; a background thread
-    // subscribed to the in-memory log ring buffer fans out each record.
-    let ws_senders: Arc<Mutex<Vec<EspHttpWsDetachedSender>>> = Arc::new(Mutex::new(Vec::new()));
+    // `EspHttpWsDetachedSender` for each new session; a single fan-out
+    // thread (spawned by `spawn_ws_fanout`, after every server is built)
+    // subscribes to the log ring buffer and pushes records to all open
+    // senders, regardless of which server (HTTP or HTTPS) created them.
     {
         let senders = ws_senders.clone();
-        // ws_handler's generic order is <H, E> (different from fn_handler's <E, F>).
         server.ws_handler::<_, EspError>(routes::LOGS_WS, move |conn: &mut esp_idf_svc::http::server::ws::EspHttpWsConnection| {
             if conn.is_new() {
-                // Send the recent backlog (last 200 records) so clients see
-                // history immediately on connect, then enroll the sender for
-                // future fan-out.
                 if let Some(buf) = log_buffer::global() {
                     for rec in buf.snapshot(200) {
                         let line = rec.formatted();
@@ -248,33 +326,8 @@ pub fn spawn(
                     senders.lock().unwrap().push(sender);
                 }
             }
-            // We don't care about incoming frames — the SPA only consumes.
-            // Closed sessions are cleaned up lazily by the fan-out thread.
             Ok(())
         })?;
-
-        // Fan-out thread: drain log records, push to every open sender.
-        std::thread::Builder::new()
-            .name("ws-log-fanout".into())
-            .stack_size(8 * 1024)
-            .spawn(move || {
-                let Some(buf) = log_buffer::global() else {
-                    return;
-                };
-                let (_id, rx) = buf.subscribe(256);
-                while let Ok(rec) = rx.recv() {
-                    let line = rec.formatted();
-                    let bytes = line.as_bytes();
-                    let mut guard = ws_senders.lock().unwrap();
-                    guard.retain_mut(|s: &mut EspHttpWsDetachedSender| {
-                        if s.is_closed() {
-                            return false;
-                        }
-                        s.send(FrameType::Text(false), bytes).is_ok()
-                    });
-                }
-            })
-            .ok();
     }
 
     // POST /api/ota → stream firmware image into the inactive OTA partition.
@@ -361,14 +414,10 @@ pub fn spawn(
             .unwrap_or_default();
             let mut resp = req.into_response(202, None, JSON_CT)?;
             resp.write_all(&body)?;
-            std::thread::Builder::new()
-                .name("ota-reboot".into())
-                .stack_size(2048)
-                .spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    crate::net_ota::reboot();
-                })
-                .ok();
+            crate::task_util::spawn_named(c"ota-reboot", 2048, || {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                crate::net_ota::reboot();
+            });
             Ok(())
         })?;
     }
@@ -403,17 +452,35 @@ pub fn spawn(
             // 202 Accepted; client gets the response, then the device reboots.
             let _ = req.into_response(202, None, &[])?;
             // Schedule restart after a brief delay so the response actually flushes.
-            std::thread::Builder::new()
-                .name("reset-reboot".into())
-                .stack_size(2048)
-                .spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    unsafe { esp_idf_svc::sys::esp_restart() };
-                })
-                .ok();
+            crate::task_util::spawn_named(c"reset-reboot", 2048, || {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                unsafe { esp_idf_svc::sys::esp_restart() };
+            });
             Ok(())
         })?;
     }
 
-    Ok(server)
+    Ok(())
+}
+
+/// Drain the log ring buffer and fan-out each record to every open WS
+/// sender. Single thread, shared across both HTTP and HTTPS servers.
+fn spawn_ws_fanout(senders: Arc<Mutex<Vec<EspHttpWsDetachedSender>>>) {
+    crate::task_util::spawn_named(c"ws-log-fanout", 8 * 1024, move || {
+            let Some(buf) = log_buffer::global() else {
+                return;
+            };
+            let (_id, rx) = buf.subscribe(256);
+            while let Ok(rec) = rx.recv() {
+                let line = rec.formatted();
+                let bytes = line.as_bytes();
+                let mut guard = senders.lock().unwrap();
+                guard.retain_mut(|s: &mut EspHttpWsDetachedSender| {
+                    if s.is_closed() {
+                        return false;
+                    }
+                    s.send(FrameType::Text(false), bytes).is_ok()
+                });
+            }
+    });
 }

@@ -50,11 +50,66 @@ CONFIG_HTTPD_WS_SUPPORT=y
 # mDNS responder so doremorwater.local resolves on the LAN.
 CONFIG_MDNS_MAX_INTERFACES=2
 
-# HTTPS server is OFF by default because:
-#   1. esp_https_server's HTTP-only fallback null-derefs under QEMU (real
-#      hardware likely fine but it's untested by us).
-#   2. Even when enabled, it runs in addition to plain HTTP, so getting it
-#      wrong locks the device out.
-# To enable: change to `=y`, paste cert + key into Config.https via the
-# Settings tab, and rebuild + reflash.
-# CONFIG_ESP_HTTPS_SERVER_ENABLE=y
+# HTTPS server. The firmware spawns *two* EspHttpServer instances when a
+# cert + key are configured: one plain on :80, one TLS on :443. With no cert
+# the device falls back to HTTP-only on :80 (esp_https_server is still linked
+# in but starts in HTTPD_SSL_TRANSPORT_INSECURE mode).
+#
+# Note: esp_https_server's HTTP-only fallback null-derefs under QEMU, so
+# `--features qemu` builds may not boot. Real hardware works.
+CONFIG_ESP_HTTPS_SERVER_ENABLE=y
+
+# LWIP socket pool. Default is 10. Two HTTPD servers each bring (listening
+# + control + N sessions) sockets — easy to overshoot 10 and start hitting
+# `accept (23)` (ENFILE) errors. 16 leaves headroom for telnet (:23), the
+# WebSocket fanout, and a couple browser tabs without hitting the cap.
+CONFIG_LWIP_MAX_SOCKETS=16
+
+# HTTPD request header buffer. Default 512 is too tight for a real browser
+# (Chromium sends User-Agent + Accept-* + multiple Sec-* + WS-upgrade easily
+# overflowing 512 B), producing 431 Request Header Fields Too Large. 1024
+# is roomy for browser navigation; the cost is ~512 B of heap per active
+# connection, which we've now got room for.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+
+# mbedTLS memory tuning. Defaults are sized for an STA32 with 320 KB SRAM;
+# on this device with two HTTPD servers running we have ~20 KB free heap at
+# steady state and `mbedtls_ssl_setup` was returning ALLOC_FAILED on every
+# handshake. Two changes:
+#   1. DYNAMIC_BUFFER: only allocate the 16 KiB SSL read/write buffers when
+#      a handshake is in flight, not pre-allocated per session. ~32 KB heap
+#      saved at idle.
+#   2. Lower the per-message buffer ceiling from 16 KiB → 4 KiB. The SPA's
+#      JSON responses are <2 KiB; OTA upload is the only chunked path that
+#      cares and it's HTTP-only.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+
+# Heap-saving knobs that DON'T drop user-visible features (WPA3, IPv6,
+# Enterprise auth and OTA are all preserved).
+#
+# WiFi buffer pools — defaults are tuned for hundreds of KB/s of throughput.
+# This device serves sub-kB JSON; halving the dynamic buffer counts frees
+# ~30 KiB heap with no observable impact on latency or capability.
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
+# TCP/IP recv mailbox depth: 32 is generous; 8 is ample for our traffic.
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=8
+
+# Enable FreeRTOS trace + run-time stats so /api/diag can call
+# uxTaskGetSystemState() and surface per-task stack high-water marks.
+# Cost is small — a few bytes per task struct + a free-running run-time
+# counter. Worth it for the visibility while we tune RAM.
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+
+# PSRAM probed once on this board (ESP32-D0WD, WROOM module): not present
+# ("PSRAM ID read error: 0xffffffff"). Probing costs ~12 KiB of IRAM (the
+# QPSRAM driver code is loaded even when init fails), which we can't spare
+# on a heap-tight device. Re-enable for any new board that's WROVER-based:
+#
+#   CONFIG_SPIRAM=y
+#   CONFIG_SPIRAM_USE_MEMMAP=y
+#   CONFIG_SPIRAM_IGNORE_NOTFOUND=y

@@ -9,9 +9,9 @@
 //! ESP-IDF's DHCP server hands out our IP as the DNS too, so phones
 //! joining the AP query us and we redirect them.
 
+use crate::task_util::spawn_named;
 use std::net::{Ipv4Addr, UdpSocket};
 use std::sync::{Arc, Mutex};
-use std::thread;
 
 /// Shared "where should DNS replies point" — updated by the WiFi supervisor
 /// as STA / AP state changes. When set, the DNS thread answers every A
@@ -20,10 +20,8 @@ use std::thread;
 pub type RedirectIp = Arc<Mutex<Option<Ipv4Addr>>>;
 
 pub fn spawn(redirect: RedirectIp) {
-    thread::Builder::new()
-        .name("captive-dns".into())
-        .stack_size(6 * 1024)
-        .spawn(move || {
+    // 6 KiB ran with only 640 B headroom. 8 KiB gives ~2 KiB margin.
+    spawn_named(c"captive-dns", 8 * 1024, move || {
             let socket = match UdpSocket::bind("0.0.0.0:53") {
                 Ok(s) => s,
                 Err(e) => {
@@ -48,8 +46,7 @@ pub fn spawn(redirect: RedirectIp) {
                     let _ = socket.send_to(&resp, src);
                 }
             }
-        })
-        .ok();
+        });
 }
 
 /// Build an A-record response for a single-question query, pointing at
