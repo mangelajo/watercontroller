@@ -132,11 +132,24 @@ CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 
-# PSRAM probed once on this board (ESP32-D0WD, WROOM module): not present
-# ("PSRAM ID read error: 0xffffffff"). Probing costs ~12 KiB of IRAM (the
-# QPSRAM driver code is loaded even when init fails), which we can't spare
-# on a heap-tight device. Re-enable for any new board that's WROVER-based:
+# PSRAM. On WROVER / ESP32-PICO modules with external SPI RAM, IDF maps
+# it into the address space and (with USE_MALLOC) routes large allocations
+# through it via `heap_caps_malloc(MALLOC_CAP_SPIRAM)`. On a WROOM (no
+# PSRAM), the probe fails fast and IGNORE_NOTFOUND lets boot continue, at
+# the cost of ~12 KiB of IRAM for the dead QPSRAM driver code — we accept
+# that so the same firmware works on either module variant.
 #
-#   CONFIG_SPIRAM=y
-#   CONFIG_SPIRAM_USE_MEMMAP=y
-#   CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+# USE_MALLOC adds PSRAM as a 32-bit-accessible heap pool that mbedTLS,
+# lwIP buffers, log_buffer, and any unconstrained `Box::new` will pull
+# from once on-chip DRAM is depleted, freeing the precious ~287 KiB of
+# SRAM for code that requires 8-bit access (DMA buffers, ISR data).
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_BOOT_INIT=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_40M=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+# Threshold below which malloc tries SRAM first; above this it goes
+# straight to PSRAM. 16 KiB is a reasonable cutoff: small allocs benefit
+# from on-chip latency, large allocs wouldn't fit anyway.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384

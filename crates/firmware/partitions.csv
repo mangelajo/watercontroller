@@ -1,9 +1,11 @@
 # 4 MB flash layout. ota_0 + ota_1 give us A/B firmware slots for safe OTA.
-# spiffs reserved for future SPA asset storage if we move them out of the binary.
+# Each slot is 1.9 MB to leave room for PSRAM-probe-enabled builds plus any
+# future code growth. The spiffs partition was reserved earlier for asset
+# storage but never got used (the SPA is embedded via include_bytes!), so
+# we reclaim it as headroom in the OTA slots.
 # Name,    Type, SubType,  Offset,    Size,      Flags
 nvs,       data, nvs,      0x9000,    0x6000,
 otadata,   data, ota,      0xf000,    0x2000,
 phy_init,  data, phy,      0x11000,   0x1000,
-ota_0,     app,  ota_0,    0x20000,   0x180000,
-ota_1,     app,  ota_1,    0x1A0000,  0x180000,
-spiffs,    data, spiffs,   0x320000,  0xE0000,
+ota_0,     app,  ota_0,    0x20000,   0x1F0000,
+ota_1,     app,  ota_1,    0x210000,  0x1F0000,
