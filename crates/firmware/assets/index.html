@@ -108,6 +108,38 @@
   pre.logs .info { color: var(--text); }
   pre.logs .debug { color: var(--muted); }
 
+  /* Tabs */
+  nav.tabs {
+    display: flex; gap: 6px; padding: 0 22px;
+    border-bottom: 1px solid var(--border); background: var(--bg);
+  }
+  nav.tabs button {
+    background: transparent; color: var(--muted); border: none;
+    padding: 12px 16px; font: inherit; cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+  nav.tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+  section.tab { display: none; }
+  section.tab.active { display: grid; }
+
+  textarea.config {
+    width: 100%; min-height: 420px; box-sizing: border-box;
+    background: #0a0d12; border: 1px solid var(--border); border-radius: 8px;
+    color: #c9d1d9; padding: 12px; resize: vertical;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+  button.btn {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    padding: 8px 14px; border-radius: 6px; cursor: pointer; font: inherit;
+  }
+  button.btn:hover { border-color: var(--accent); }
+  button.btn.primary { background: var(--accent); color: #0a0d12; border-color: var(--accent); }
+  button.btn.danger  { background: var(--bad);    color: #0a0d12; border-color: var(--bad); }
+  .status-msg { color: var(--muted); font-size: 12px; }
+  .status-msg.ok  { color: var(--good); }
+  .status-msg.err { color: var(--bad); }
+
   footer {
     text-align: center; color: var(--muted);
     padding: 18px; font-size: 12px;
@@ -120,7 +152,12 @@
     <div class="pill"><span class="dot" id="conn-dot"></span><span id="conn-text">connecting…</span></div>
   </header>
 
-  <main>
+  <nav class="tabs">
+    <button data-tab="dashboard" class="active">Dashboard</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+
+  <main id="dashboard" class="tab active">
     <section class="card">
       <h2>Sensors</h2>
       <div class="metric"><span class="label">Battery</span><span><span class="value" id="m-battery">—</span><span class="unit">V</span></span></div>
@@ -150,6 +187,27 @@
     <section class="card full">
       <h2>Logs</h2>
       <pre class="logs" id="logs"></pre>
+    </section>
+  </main>
+
+  <main id="settings" class="tab" style="grid-template-columns: 1fr;">
+    <section class="card full">
+      <h2>Config (JSON)</h2>
+      <textarea id="cfg-json" class="config" spellcheck="false"></textarea>
+      <div class="row">
+        <button class="btn primary" id="cfg-save">Save</button>
+        <button class="btn" id="cfg-reload">Reload from device</button>
+        <span class="status-msg" id="cfg-msg"></span>
+      </div>
+    </section>
+    <section class="card full">
+      <h2>Danger zone</h2>
+      <p class="status-msg">Factory reset wipes the persisted config and reboots the device.
+        Useful if WiFi credentials get the device into an unreachable state.</p>
+      <div class="row">
+        <button class="btn danger" id="factory-reset">Factory reset</button>
+        <span class="status-msg" id="reset-msg"></span>
+      </div>
     </section>
   </main>
 
@@ -261,6 +319,72 @@
 
   refreshStatus();
   setInterval(refreshStatus, 2000);
+
+  // Tabs
+  for (const btn of document.querySelectorAll("nav.tabs button")) {
+    btn.addEventListener("click", () => {
+      const tab = btn.dataset.tab;
+      for (const b of document.querySelectorAll("nav.tabs button")) b.classList.toggle("active", b === btn);
+      for (const s of document.querySelectorAll("section.tab")) s.classList.toggle("active", s.id === tab);
+      if (tab === "settings") loadConfig();
+    });
+  }
+
+  async function loadConfig() {
+    const msg = $("#cfg-msg");
+    msg.textContent = "loading…"; msg.className = "status-msg";
+    try {
+      const r = await fetch("/api/config");
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const cfg = await r.json();
+      $("#cfg-json").value = JSON.stringify(cfg, null, 2);
+      msg.textContent = "loaded"; msg.className = "status-msg ok";
+    } catch (e) {
+      msg.textContent = "load failed: " + e.message;
+      msg.className = "status-msg err";
+    }
+  }
+
+  $("#cfg-reload").addEventListener("click", loadConfig);
+
+  $("#cfg-save").addEventListener("click", async () => {
+    const msg = $("#cfg-msg");
+    let parsed;
+    try { parsed = JSON.parse($("#cfg-json").value); }
+    catch (e) {
+      msg.textContent = "invalid JSON: " + e.message;
+      msg.className = "status-msg err";
+      return;
+    }
+    msg.textContent = "saving…"; msg.className = "status-msg";
+    try {
+      const r = await fetch("/api/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed),
+      });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      msg.textContent = "saved"; msg.className = "status-msg ok";
+    } catch (e) {
+      msg.textContent = "save failed: " + e.message;
+      msg.className = "status-msg err";
+    }
+  });
+
+  $("#factory-reset").addEventListener("click", async () => {
+    if (!confirm("Wipe persisted config and reboot? You'll need to reconfigure WiFi.")) return;
+    const msg = $("#reset-msg");
+    msg.textContent = "requesting reset…"; msg.className = "status-msg";
+    try {
+      const r = await fetch("/api/factory_reset", { method: "POST" });
+      if (r.status === 202) { msg.textContent = "reset accepted; device rebooting"; msg.className = "status-msg ok"; }
+      else if (r.status === 501) { msg.textContent = "factory reset is firmware-only (host build)"; msg.className = "status-msg"; }
+      else { msg.textContent = "unexpected " + r.status; msg.className = "status-msg err"; }
+    } catch (e) {
+      msg.textContent = "request failed: " + e.message;
+      msg.className = "status-msg err";
+    }
+  });
 </script>
 </body>
 </html>

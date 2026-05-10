@@ -78,7 +78,13 @@ fn main() -> Result<()> {
     };
 
     let clock: Arc<dyn Clock> = Arc::new(EspClock);
-    let app = App::new(clock.clone(), config.clone());
+    let app = App::with_nvs(clock.clone(), config.clone(), Some(nvs_store.clone()));
+    if let Some(state) = app.restored_valve_state() {
+        info!(
+            "boot: restored composite water control state = {}",
+            if state { "ON" } else { "OFF" }
+        );
+    }
 
     // Bring up WiFi (multi-SSID with AP fallback). The `qemu` feature skips
     // this — qemu doesn't simulate the WiFi peripheral well enough to
