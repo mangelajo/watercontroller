@@ -89,6 +89,30 @@ CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
 CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
 
+# TLS session resumption on the server. When a browser reconnects within
+# the ticket lifetime it can skip the full ECDH handshake (~12 KiB peak
+# transient alloc) and resume using the cached session keys. Single biggest
+# win for "open SPA, navigate around, multiple parallel fetches" workloads.
+CONFIG_ESP_TLS_SERVER_SESSION_TICKETS=y
+
+# Trim mbedTLS curves and crypto we don't use. Keep:
+#   SECP256R1     — our self-signed cert + most public CAs
+#   SECP384R1     — some public CAs
+#   CURVE25519    — X25519 ECDH key exchange
+# Disable everything else (BP*, K1, 192R1, 224R1) — saves ~5 KiB code +
+# a few KiB of one-time tables. RSA stays on so MQTT TLS to brokers
+# keeps working.
+# CONFIG_MBEDTLS_ECP_DP_SECP192R1_ENABLED is not set
+# CONFIG_MBEDTLS_ECP_DP_SECP224R1_ENABLED is not set
+# CONFIG_MBEDTLS_ECP_DP_SECP192K1_ENABLED is not set
+# CONFIG_MBEDTLS_ECP_DP_SECP224K1_ENABLED is not set
+# CONFIG_MBEDTLS_ECP_DP_SECP256K1_ENABLED is not set
+# CONFIG_MBEDTLS_ECP_DP_BP256R1_ENABLED is not set
+# CONFIG_MBEDTLS_ECP_DP_BP384R1_ENABLED is not set
+# CONFIG_MBEDTLS_ECP_DP_BP512R1_ENABLED is not set
+# CMAC isn't used by any TLS cipher suite we care about.
+# CONFIG_MBEDTLS_CMAC_C is not set
+
 # Heap-saving knobs that DON'T drop user-visible features (WPA3, IPv6,
 # Enterprise auth and OTA are all preserved).
 #
