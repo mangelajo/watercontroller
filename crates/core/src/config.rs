@@ -43,13 +43,25 @@ impl Default for WifiConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MqttConfig {
-    pub broker_url: String, // e.g. mqtt://homeassistant.local:1883
+    /// e.g. `mqtt://homeassistant.local:1883` or `mqtts://broker:8883` for TLS.
+    pub broker_url: String,
     pub username: String,
     pub password: String,
     /// Base topic for all device-published topics. Defaults to the hostname.
     pub base_topic: String,
     pub ha_discovery_prefix: String, // typically "homeassistant"
     pub enabled: bool,
+    /// PEM-encoded CA certificate to trust the broker (server-side TLS).
+    /// Required for `mqtts://` unless your broker uses a public CA the
+    /// device's bundle already trusts. Empty = no custom CA.
+    #[serde(default)]
+    pub ca_cert_pem: String,
+    /// PEM-encoded client certificate, for mutual TLS. Empty = no client cert.
+    #[serde(default)]
+    pub client_cert_pem: String,
+    /// PEM-encoded client private key, paired with `client_cert_pem`.
+    #[serde(default)]
+    pub client_key_pem: String,
 }
 
 impl Default for MqttConfig {
@@ -61,6 +73,9 @@ impl Default for MqttConfig {
             base_topic: "doremorwater".into(),
             ha_discovery_prefix: "homeassistant".into(),
             enabled: false,
+            ca_cert_pem: String::new(),
+            client_cert_pem: String::new(),
+            client_key_pem: String::new(),
         }
     }
 }
@@ -117,12 +132,25 @@ impl Default for WireguardConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct HttpsConfig {
+    /// PEM-encoded X.509 certificate for the on-device HTTPS server. If
+    /// either this or `key_pem` is empty, only HTTP is served (port 80).
+    /// Generate a self-signed cert + key with:
+    ///   `openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes`
+    pub cert_pem: String,
+    /// PEM-encoded private key paired with `cert_pem`.
+    pub key_pem: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default)]
     pub wifi: WifiConfig,
     #[serde(default)]
     pub mqtt: MqttConfig,
+    #[serde(default)]
+    pub https: HttpsConfig,
     #[serde(default)]
     pub sensors: SensorsConfig,
     #[serde(default = "default_timezone")]
@@ -159,6 +187,7 @@ impl Default for Config {
         Self {
             wifi: WifiConfig::default(),
             mqtt: MqttConfig::default(),
+            https: HttpsConfig::default(),
             sensors: SensorsConfig::default(),
             timezone: default_timezone(),
             sntp_servers: default_sntp_servers(),

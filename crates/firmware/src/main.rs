@@ -172,7 +172,13 @@ fn main() -> Result<()> {
     }
 
     log_telnet::spawn(23);
-    let _httpd = http_server::spawn(app.clone(), nvs_store.clone(), 80)?;
+    let _httpd = http_server::spawn(
+        app.clone(),
+        nvs_store.clone(),
+        80,
+        &config.https.cert_pem,
+        &config.https.key_pem,
+    )?;
 
     // Periodic config persistence: save the in-memory config back to NVS once
     // a minute. This catches edits made via PUT /api/config without forcing
@@ -356,6 +362,9 @@ fn spawn_mqtt_supervisor(app: App, mqtt: Arc<EspMqtt>, wifi: Arc<WifiSupervisor>
                         Some(cfg.mqtt.username.as_str()).filter(|s| !s.is_empty()),
                         Some(cfg.mqtt.password.as_str()).filter(|s| !s.is_empty()),
                         &cfg.wifi.hostname,
+                        &cfg.mqtt.ca_cert_pem,
+                        &cfg.mqtt.client_cert_pem,
+                        &cfg.mqtt.client_key_pem,
                     ) {
                         log::warn!("mqtt connect failed: {e:?}");
                         continue;

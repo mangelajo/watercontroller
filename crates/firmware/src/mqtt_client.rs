@@ -33,19 +33,43 @@ impl EspMqtt {
     }
 
     /// (Re)connect to the configured broker. Safe to call multiple times —
-    /// previous client is dropped first.
+    /// previous client is dropped first. PEM cert strings, when non-empty,
+    /// are leaked into a `&'static [u8]` (with NUL terminator) so the
+    /// underlying mbedTLS retains them for the lifetime of the client.
     pub fn connect(
         &self,
         url: &str,
         username: Option<&str>,
         password: Option<&str>,
         client_id: &str,
+        ca_cert_pem: &str,
+        client_cert_pem: &str,
+        client_key_pem: &str,
     ) -> Result<()> {
+        let server_cert = if ca_cert_pem.is_empty() {
+            None
+        } else {
+            Some(esp_idf_svc::tls::X509::pem(leak_cstr(ca_cert_pem)))
+        };
+        let client_cert = if client_cert_pem.is_empty() {
+            None
+        } else {
+            Some(esp_idf_svc::tls::X509::pem(leak_cstr(client_cert_pem)))
+        };
+        let private_key = if client_key_pem.is_empty() {
+            None
+        } else {
+            Some(esp_idf_svc::tls::X509::pem(leak_cstr(client_key_pem)))
+        };
+
         let cfg = MqttClientConfiguration {
             client_id: Some(client_id),
             username,
             password,
             keep_alive_interval: Some(Duration::from_secs(30)),
+            server_certificate: server_cert,
+            client_certificate: client_cert,
+            private_key,
             ..Default::default()
         };
         let handler = self.handler.clone();
@@ -56,6 +80,15 @@ impl EspMqtt {
         *self.inner.lock().unwrap() = Some(client);
         Ok(())
     }
+}
+
+fn leak_cstr(s: &str) -> &'static std::ffi::CStr {
+    let mut bytes = s.as_bytes().to_vec();
+    if !bytes.last().is_some_and(|&b| b == 0) {
+        bytes.push(0);
+    }
+    let leaked: &'static [u8] = bytes.leak();
+    std::ffi::CStr::from_bytes_with_nul(leaked).expect("nul-terminated above")
 }
 
 impl Default for EspMqtt {

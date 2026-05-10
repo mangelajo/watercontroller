@@ -42,6 +42,15 @@ fn require_auth(
     }
 }
 
+fn leak_cstr(s: &str) -> &'static std::ffi::CStr {
+    let mut bytes = s.as_bytes().to_vec();
+    if !bytes.last().is_some_and(|&b| b == 0) {
+        bytes.push(0);
+    }
+    let leaked: &'static [u8] = bytes.leak();
+    std::ffi::CStr::from_bytes_with_nul(leaked).expect("nul-terminated above")
+}
+
 fn write_unauthorized(
     req: esp_idf_svc::http::server::Request<&mut esp_idf_svc::http::server::EspHttpConnection<'_>>,
 ) -> Result<(), EspIOError> {
@@ -57,15 +66,38 @@ fn write_unauthorized(
 const JSON_CT: &[(&str, &str)] = &[("Content-Type", "application/json")];
 const HTML_CT: &[(&str, &str)] = &[("Content-Type", "text/html; charset=utf-8")];
 
+/// Spawn the HTTPD. If `cert_pem` and `key_pem` are both non-empty, an
+/// HTTPS listener on port 443 is started in addition to plain HTTP on
+/// `port`. Empty cert/key = HTTP only.
 pub fn spawn(
     app: App,
     nvs: Arc<dyn NvsStore>,
     port: u16,
+    cert_pem: &str,
+    key_pem: &str,
 ) -> Result<EspHttpServer<'static>> {
     let cfg = esp_idf_svc::http::server::Configuration {
         http_port: port,
         ..Default::default()
     };
+    // HTTPS support requires CONFIG_ESP_HTTPS_SERVER_ENABLE=y in
+    // sdkconfig.defaults — see the comment in that file. When enabled, the
+    // following block plugs the configured PEM bundle into the server.
+    #[cfg(esp_idf_esp_https_server_enable)]
+    let cfg = {
+        let mut cfg = cfg;
+        if !cert_pem.is_empty() && !key_pem.is_empty() {
+            log::info!("https: cert/key present, enabling :443 alongside :{port}");
+            cfg.server_certificate = Some(esp_idf_svc::tls::X509::pem(leak_cstr(cert_pem)));
+            cfg.private_key = Some(esp_idf_svc::tls::X509::pem(leak_cstr(key_pem)));
+            cfg.https_port = 443;
+        } else {
+            log::info!("https: no cert/key configured, plain HTTP only on :{port}");
+        }
+        cfg
+    };
+    #[cfg(not(esp_idf_esp_https_server_enable))]
+    let _ = (cert_pem, key_pem);
     let mut server = EspHttpServer::new(&cfg)?;
 
     server.fn_handler::<EspIOError, _>("/", Method::Get, |req| {
