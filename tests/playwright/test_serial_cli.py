@@ -110,3 +110,15 @@ def test_serial_cli_wifi_list(console):
 def test_serial_cli_unknown_command(console):
     console.sendline("bogus_command_xyz")
     console.expect(rb">> unknown command: bogus_command_xyz", timeout=20)
+
+
+def test_serial_cli_log_level(console):
+    """`log <level>` accepts the canonical levels and rejects garbage.
+    We restore `info` at the end so subsequent tests / interactive
+    sessions get the default verbosity back."""
+    console.sendline("log warn")
+    console.expect(rb">> log level set to warn", timeout=10)
+    console.sendline("log bogus")
+    console.expect(rb">> usage: log <off\|error\|warn\|info\|debug\|trace>", timeout=10)
+    console.sendline("log info")
+    console.expect(rb">> log level set to info", timeout=10)

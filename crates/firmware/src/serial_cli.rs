@@ -17,6 +17,7 @@
 //!   wifi connect                — kick supervisor to retry
 //!   wifi scan                   — discover nearby APs
 //!   ap-info                     — current AP fallback SSID
+//!   log <level>                 — set log verbosity (off/error/warn/info/debug/trace)
 //!   reset                       — soft reboot
 //!   factory_reset               — wipe NVS config and reboot
 //!
@@ -170,6 +171,12 @@ fn dispatch(cmd: &str, app: &App, nvs: &Arc<dyn NvsStore>, wifi: &Arc<dyn Wifi>)
             },
             _ => println!(">> usage: wifi <list|add|del|clear|connect|scan>"),
         },
+        Some("log") => {
+            match it.next() {
+                Some(level) => set_log_level(level),
+                None => println!(">> usage: log <off|error|warn|info|debug|trace>"),
+            }
+        }
         Some("ap-info") => {
             let cfg = app.config();
             println!(">> ap_ssid: {} (password set: {})", cfg.wifi.ap_ssid, !cfg.wifi.ap_password.is_empty());
@@ -205,9 +212,38 @@ fn print_help() {
 >>   wifi connect                kick supervisor\n\
 >>   wifi scan                   discover nearby APs\n\
 >>   ap-info                     show AP fallback SSID\n\
+>>   log <level>                 set log verbosity (off/error/warn/info/debug/trace)\n\
 >>   reset                       reboot\n\
 >>   factory_reset               wipe NVS config + reboot";
     println!("{help}");
+}
+
+/// Set both the Rust-side `log` crate max level and the ESP-IDF
+/// C-side log level (wildcard tag). The C-side is what's flooding
+/// the console at runtime — wifi events, https handshakes, heartbeat
+/// `alive` lines — so without flipping the C side too, `log off` only
+/// silences our own Rust modules and leaves the noise.
+fn set_log_level(level_str: &str) {
+    use esp_idf_svc::sys as sys;
+    let (rust_level, c_level) = match level_str.to_ascii_lowercase().as_str() {
+        "off" | "none" => (log::LevelFilter::Off, sys::esp_log_level_t_ESP_LOG_NONE),
+        "error"        => (log::LevelFilter::Error, sys::esp_log_level_t_ESP_LOG_ERROR),
+        "warn" | "warning" => (log::LevelFilter::Warn, sys::esp_log_level_t_ESP_LOG_WARN),
+        "info"         => (log::LevelFilter::Info, sys::esp_log_level_t_ESP_LOG_INFO),
+        "debug"        => (log::LevelFilter::Debug, sys::esp_log_level_t_ESP_LOG_DEBUG),
+        "trace" | "verbose" => (log::LevelFilter::Trace, sys::esp_log_level_t_ESP_LOG_VERBOSE),
+        _ => {
+            println!(">> usage: log <off|error|warn|info|debug|trace>");
+            return;
+        }
+    };
+    log::set_max_level(rust_level);
+    unsafe {
+        // "*" applies to every tag the IDF logger emits.
+        let wildcard = c"*".as_ptr() as *const _;
+        sys::esp_log_level_set(wildcard, c_level);
+    }
+    println!(">> log level set to {level_str}");
 }
 
 fn list_networks(app: &App) {
