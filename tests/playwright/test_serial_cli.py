@@ -150,6 +150,19 @@ def test_serial_cli_mem(console):
     console.expect(rb">>\s+min-ever free\s*:\s+[\d,]+ B", timeout=5)
 
 
+def test_serial_cli_alarm_status_and_clear(console):
+    """`alarm status` prints the config + latched state; `alarm clear`
+    acks. We don't assert on specific numbers — the config may have
+    been mutated by other test runs against the same NVS — just the
+    structure of the response."""
+    console.sendline("alarm status")
+    console.expect(rb">> flow alarm: (ACTIVE|idle) \| enabled=(true|false)", timeout=10)
+    console.sendline("alarm clear")
+    console.expect(rb">> alarm cleared", timeout=10)
+    console.sendline("alarm bogus")
+    console.expect(rb">> usage: alarm <status\|clear>", timeout=10)
+
+
 def test_serial_cli_log_level(console):
     """`log <level>` accepts the canonical levels and rejects garbage.
     We restore `info` at the end so subsequent tests / interactive

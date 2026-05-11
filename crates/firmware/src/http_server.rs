@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex};
 use watercontroller_core::api::{routes, ApiError, CommandOutcome, ConfigUpdate, SwitchCommand};
 use watercontroller_core::app::App;
 use watercontroller_core::config::{
-    Config, HttpsConfig, MqttConfig, SensorsConfig, SwitchesConfig, WifiConfig, WireguardConfig,
+    Config, FlowAlarmConfig, HttpsConfig, MqttConfig, SensorsConfig, SwitchesConfig, WifiConfig,
+    WireguardConfig,
 };
 use watercontroller_core::log_buffer;
 use watercontroller_core::schedule::Schedule;
@@ -417,6 +418,15 @@ fn register_handlers(
             }
         },
     )?;
+    register_section(
+        server,
+        "/api/config/flow_alarm",
+        app.clone(), app.clone(), nvs.clone(),
+        |cfg| cfg.flow_alarm.clone(),
+        |cfg, new: FlowAlarmConfig| {
+            cfg.flow_alarm = new;
+        },
+    )?;
 
     {
         let app = app.clone();
@@ -636,6 +646,19 @@ fn register_handlers(
                 return write_unauthorized(req);
             }
             wifi.reconnect();
+            let _ = req.into_response(204, None, &[])?;
+            Ok(())
+        })?;
+    }
+
+    // POST /api/alarm/clear → reset the latched flow-rate alarm.
+    {
+        let app = app.clone();
+        server.fn_handler::<EspIOError, _>(routes::ALARM_CLEAR, Method::Post, move |req| {
+            if require_auth(&req, &app).is_err() {
+                return write_unauthorized(req);
+            }
+            app.clear_flow_alarm();
             let _ = req.into_response(204, None, &[])?;
             Ok(())
         })?;

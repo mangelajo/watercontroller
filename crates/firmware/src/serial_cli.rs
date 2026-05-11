@@ -20,6 +20,8 @@
 //!   log <level>                 — set log verbosity (off/error/warn/info/debug/trace)
 //!   tasks                       — tabulated task list (name, state, priority, stack free)
 //!   mem                         — heap statistics (free, allocated, largest block, min-ever)
+//!   alarm status                — show flow alarm config + latched state
+//!   alarm clear                 — reset the latched flow alarm
 //!   reset                       — soft reboot
 //!   factory_reset               — wipe NVS config and reboot
 //!
@@ -181,6 +183,14 @@ fn dispatch(cmd: &str, app: &App, nvs: &Arc<dyn NvsStore>, wifi: &Arc<dyn Wifi>)
         }
         Some("tasks") => print_tasks(),
         Some("mem") => print_mem(),
+        Some("alarm") => match it.next() {
+            Some("status") => print_alarm_status(app),
+            Some("clear") => {
+                app.clear_flow_alarm();
+                println!(">> alarm cleared");
+            }
+            _ => println!(">> usage: alarm <status|clear>"),
+        },
         Some("ap-info") => {
             let cfg = app.config();
             println!(">> ap_ssid: {} (password set: {})", cfg.wifi.ap_ssid, !cfg.wifi.ap_password.is_empty());
@@ -219,6 +229,8 @@ fn print_help() {
 >>   log <level>                 set log verbosity (off/error/warn/info/debug/trace)\n\
 >>   tasks                       tabulated task list (name/state/pri/stack free)\n\
 >>   mem                         heap stats (free/allocated/largest/min-ever)\n\
+>>   alarm status                show flow alarm config + latched state\n\
+>>   alarm clear                 reset the latched flow alarm\n\
 >>   reset                       reboot\n\
 >>   factory_reset               wipe NVS config + reboot";
     println!("{help}");
@@ -262,6 +274,19 @@ fn list_networks(app: &App) {
         let pw = if n.password.is_empty() { "<open>" } else { "<set>" };
         println!(">>   [{i}] ssid={} password={pw}", n.ssid);
     }
+}
+
+/// Flow alarm status — config + latched state.
+#[inline(never)]
+fn print_alarm_status(app: &App) {
+    let cfg = app.config();
+    let a = &cfg.flow_alarm;
+    let snap = app.snapshot();
+    let active = if snap.alarm.active { "ACTIVE" } else { "idle" };
+    println!(
+        ">> flow alarm: {active} | enabled={} threshold={:.1} L/h duration={} s | elapsed={} s",
+        a.enabled, a.threshold_lph, a.duration_secs, snap.alarm.elapsed_secs
+    );
 }
 
 /// Tabulated task list — same data as `/api/diag`. Columns sized for a

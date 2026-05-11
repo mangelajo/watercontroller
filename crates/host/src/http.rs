@@ -14,7 +14,8 @@ use tokio::sync::broadcast;
 use watercontroller_core::api::{routes, ConfigUpdate, SwitchCommand, WifiScanResponse};
 use watercontroller_core::traits::Wifi;
 use watercontroller_core::config::{
-    HttpsConfig, MqttConfig, SensorsConfig, SwitchesConfig, WifiConfig, WireguardConfig,
+    FlowAlarmConfig, HttpsConfig, MqttConfig, SensorsConfig, SwitchesConfig, WifiConfig,
+    WireguardConfig,
 };
 use watercontroller_core::log_buffer::LogRecord;
 use watercontroller_core::schedule::Schedule;
@@ -56,11 +57,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/config/wireguard", get(get_wg).put(put_wg))
         .route("/api/config/time",      get(get_time).put(put_time))
         .route("/api/config/auth",      get(get_auth).put(put_auth))
+        .route("/api/config/flow_alarm", get(get_flow_alarm).put(put_flow_alarm))
         .route(routes::SWITCH, post(post_switch))
         .route(routes::LOGS_WS, get(ws_logs))
         .route(routes::FACTORY_RESET, post(post_factory_reset))
         .route(routes::WIFI_SCAN, get(get_wifi_scan))
         .route("/api/wifi/reconnect", post(post_wifi_reconnect))
+        .route(routes::ALARM_CLEAR, post(post_alarm_clear))
         .with_state(Arc::new(state))
 }
 
@@ -76,6 +79,24 @@ async fn get_wifi_scan(State(s): State<Arc<AppState>>) -> impl IntoResponse {
 
 async fn post_wifi_reconnect(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     s.wifi.reconnect();
+    StatusCode::NO_CONTENT
+}
+
+async fn get_flow_alarm(State(s): State<Arc<AppState>>) -> Json<FlowAlarmConfig> {
+    Json(s.app.config().flow_alarm.clone())
+}
+async fn put_flow_alarm(
+    State(s): State<Arc<AppState>>,
+    Json(new): Json<FlowAlarmConfig>,
+) -> impl IntoResponse {
+    let mut cfg = (*s.app.config()).clone();
+    cfg.flow_alarm = new;
+    s.app.replace_config(cfg);
+    StatusCode::NO_CONTENT
+}
+
+async fn post_alarm_clear(State(s): State<Arc<AppState>>) -> impl IntoResponse {
+    s.app.clear_flow_alarm();
     StatusCode::NO_CONTENT
 }
 

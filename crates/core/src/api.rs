@@ -63,6 +63,8 @@ pub mod routes {
     /// GET: trigger a WiFi scan and return the discovered SSIDs. Used by the
     /// AP-mode setup wizard to populate the network picker.
     pub const WIFI_SCAN: &str = "/api/wifi/scan";
+    /// POST: clear the latched flow-rate alarm.
+    pub const ALARM_CLEAR: &str = "/api/alarm/clear";
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

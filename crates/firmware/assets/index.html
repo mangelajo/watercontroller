@@ -429,6 +429,39 @@
           <span class="status-msg" id="valve-msg"></span>
         </div>
       </section>
+
+      <section class="card full">
+        <h2>Flow alarm</h2>
+        <p class="status-msg">Closes the water main valve if the flow rate stays at or above the
+          threshold for the configured duration, while no sprinkler is on. The alarm is
+          <strong>latched</strong> — once fired it stays active until you click <em>Clear</em> below.
+          MQTT topic: <code>&lt;base&gt;/flow_alarm/state</code> (ON/OFF, retained).</p>
+        <div id="alarm-banner" style="display:none; margin-bottom:8px; padding:8px 12px; background:#fff3cd; border:1px solid #ffeeba; border-radius:4px; color:#856404;">
+          <strong>Alarm active</strong> — <span id="alarm-banner-detail"></span>
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label for="alarm-enabled">Enabled</label>
+            <input type="checkbox" id="alarm-enabled">
+          </div>
+          <div class="field"></div>
+          <div class="field">
+            <label for="alarm-threshold">Threshold (L/h)</label>
+            <input type="number" min="0" max="10000" step="1" id="alarm-threshold">
+            <span class="hint">Default 100 L/h.</span>
+          </div>
+          <div class="field">
+            <label for="alarm-duration">Sustained duration (seconds)</label>
+            <input type="number" min="1" max="86400" step="1" id="alarm-duration">
+            <span class="hint">Default 60 s.</span>
+          </div>
+        </div>
+        <div class="row">
+          <button class="btn primary" id="alarm-save">Save flow alarm</button>
+          <button class="btn" id="alarm-clear">Clear alarm</button>
+          <span class="status-msg" id="flow_alarm-msg"></span>
+        </div>
+      </section>
     </section>
 
     <!-- ====== Schedule ====== -->
@@ -807,6 +840,13 @@
       $("#version").textContent = "v" + (s.firmware_version || "?");
       $("#uptime").textContent  = "uptime " + fmtUptime(s.uptime_ms);
 
+      // Flow alarm banner — visible whenever the device reports
+      // alarm.active. Lives on the Sprinklers tab but the banner sits
+      // inside the alarm card; it's shown/hidden by updateAlarmBanner.
+      if (typeof updateAlarmBanner === "function") {
+        updateAlarmBanner(s.alarm);
+      }
+
       const wifi = s.network && s.network.wifi;
       const apBanner = $("#ap-banner");
       if (wifi && wifi.kind === "connected") {
@@ -991,6 +1031,7 @@
     auth:       { path: "/api/config/auth",      body: () => ({
                     admin_token: currentConfig.admin_token,
                   }) },
+    flow_alarm: { path: "/api/config/flow_alarm", body: () => currentConfig.flow_alarm },
     // Advanced JSON editor keeps the full /api/config PUT for backup/
     // restore (and so users can edit fields the per-section forms don't
     // expose).
@@ -1138,6 +1179,51 @@
     saveConfig("sprinklers");
     msgOk("#valve-msg", "saved");
   });
+
+  // Flow alarm card
+  function renderFlowAlarm() {
+    const a = currentConfig.flow_alarm || (currentConfig.flow_alarm = {
+      enabled: false, threshold_lph: 100, duration_secs: 60,
+    });
+    $("#alarm-enabled").checked = !!a.enabled;
+    $("#alarm-threshold").value = a.threshold_lph;
+    $("#alarm-duration").value = a.duration_secs;
+  }
+  $("#alarm-save").addEventListener("click", () => {
+    currentConfig.flow_alarm = {
+      enabled: $("#alarm-enabled").checked,
+      threshold_lph: +$("#alarm-threshold").value || 0,
+      duration_secs: Math.max(1, +$("#alarm-duration").value | 0),
+    };
+    saveConfig("flow_alarm");
+  });
+  $("#alarm-clear").addEventListener("click", async () => {
+    msgInfo("#flow_alarm-msg", "clearing…");
+    try {
+      const r = await fetch("/api/alarm/clear", { method: "POST" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      msgOk("#flow_alarm-msg", "alarm cleared");
+      updateAlarmBanner({ active: false, elapsed_secs: 0 });
+    } catch (e) {
+      msgErr("#flow_alarm-msg", "clear failed: " + e.message);
+    }
+  });
+  // Poll /api/status for the alarm banner. Status is already polled
+  // by the dashboard; we just react to whatever the most recent
+  // snapshot says by hooking into the same window setInterval that
+  // refreshes other tiles (see main poll loop further down).
+  function updateAlarmBanner(alarm) {
+    const banner = $("#alarm-banner");
+    if (!banner) return;
+    if (alarm && alarm.active) {
+      banner.style.display = "block";
+      $("#alarm-banner-detail").textContent =
+        "high flow sustained ≥ " + (currentConfig.flow_alarm?.duration_secs ?? "?") +
+        " s, water_control forced off. Click Clear when investigated.";
+    } else {
+      banner.style.display = "none";
+    }
+  }
 
   // MQTT
   function renderMqtt() {
@@ -1369,7 +1455,7 @@
   function renderAllForms() {
     if (!currentConfig) return;
     renderWifi(); renderSprinklers(); renderMqtt(); renderSchedule(); renderTime();
-    renderSensors(); renderHttps(); renderWg(); renderAuth();
+    renderSensors(); renderHttps(); renderWg(); renderAuth(); renderFlowAlarm();
   }
 
   // OTA upload
