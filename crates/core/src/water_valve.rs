@@ -137,6 +137,7 @@ impl WaterValve {
                 self.phase = Phase::TurningOn { start_ms: now_ms };
             }
             Phase::Draining { .. } => {
+                log::info!("water_control: drain cancelled (turn-on requested)");
                 self.phase = Phase::TurningOn { start_ms: now_ms };
             }
             _ => {}
@@ -179,6 +180,10 @@ impl WaterValve {
                         self.phase = Phase::Idle;
                         ValveOutputs::default()
                     } else {
+                        log::info!(
+                            "water_control: drain ON ({}s)",
+                            self.timing.drain_secs
+                        );
                         self.phase = Phase::Draining { start_ms: now_ms };
                         ValveOutputs { drain: true, ..Default::default() }
                     }
@@ -193,6 +198,7 @@ impl WaterValve {
             Phase::Draining { start_ms } => {
                 let elapsed = now_ms.saturating_sub(start_ms);
                 if elapsed >= drain_hold {
+                    log::info!("water_control: drain off (timer expired)");
                     self.phase = Phase::Idle;
                     ValveOutputs::default()
                 } else {

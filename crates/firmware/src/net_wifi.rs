@@ -13,7 +13,7 @@ use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::wifi::{
     AccessPointConfiguration, AuthMethod, BlockingWifi, ClientConfiguration, Configuration,
-    EspWifi, ScanMethod,
+    EspWifi, ScanMethod, WifiEvent,
 };
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -87,7 +87,27 @@ fn run(
     sys_loop: EspSystemEventLoop,
     nvs: EspDefaultNvsPartition,
 ) -> Result<()> {
-    let mut wifi = BlockingWifi::wrap(EspWifi::new(modem, sys_loop.clone(), Some(nvs))?, sys_loop)?;
+    let mut wifi = BlockingWifi::wrap(
+        EspWifi::new(modem, sys_loop.clone(), Some(nvs))?,
+        sys_loop.clone(),
+    )?;
+
+    // Surface raw WIFI events to the log so silent drops become visible.
+    // The returned subscription must stay alive for the lifetime of run().
+    let _wifi_event_sub = sys_loop.subscribe::<WifiEvent, _>(|event| match event {
+        WifiEvent::StaDisconnected(d) => {
+            log::warn!(
+                "wifi: STA disconnected ssid={} bssid={:02x?} reason={} rssi={}",
+                String::from_utf8_lossy(d.ssid()),
+                d.bssid(),
+                d.reason(),
+                d.rssi()
+            );
+        }
+        WifiEvent::StaStopped => log::warn!("wifi: STA stopped"),
+        WifiEvent::StaBeaconTimeout => log::warn!("wifi: STA beacon timeout"),
+        _ => {}
+    })?;
 
     loop {
         let networks = sup.networks.lock().unwrap().clone();
@@ -111,13 +131,41 @@ fn run(
         }
 
         if connected {
-            // Stay connected. Periodically check link state; on disconnect,
-            // loop back and rescan.
+            // Stay connected. Every 30 s poll the AP record for RSSI + as a
+            // health probe: get_ap_info() returns NOT_CONNECT (12303) when the
+            // driver knows the link is gone, which catches silent AP drops
+            // that don't fire WIFI_EVENT_STA_DISCONNECTED. 3 consecutive
+            // failures force a reconnect.
+            let mut probe_fails: u32 = 0;
+            let mut ticks: u32 = 0;
             while wifi.is_connected().unwrap_or(false) {
                 if *sup.rescan_signal.lock().unwrap() {
                     break;
                 }
                 thread::sleep(Duration::from_secs(5));
+                ticks += 1;
+                if ticks % 6 == 0 {
+                    match wifi.wifi_mut().driver_mut().get_ap_info() {
+                        Ok(info) => {
+                            probe_fails = 0;
+                            log::info!(
+                                "wifi: link ok rssi={} dBm ssid={}",
+                                info.signal_strength,
+                                info.ssid
+                            );
+                        }
+                        Err(e) => {
+                            probe_fails += 1;
+                            log::warn!(
+                                "wifi: ap_info probe failed ({e:?}) consecutive={probe_fails}"
+                            );
+                            if probe_fails >= 3 {
+                                log::warn!("wifi: 3 probe failures — forcing reconnect");
+                                break;
+                            }
+                        }
+                    }
+                }
             }
             log::warn!("wifi: link lost, rescanning");
         } else if !networks.is_empty() {
