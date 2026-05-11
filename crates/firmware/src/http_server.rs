@@ -59,12 +59,12 @@ fn require_auth(
     req: &esp_idf_svc::http::server::Request<&mut esp_idf_svc::http::server::EspHttpConnection<'_>>,
     app: &App,
 ) -> Result<(), ()> {
-    let cfg_token = app.config().admin_token;
-    if cfg_token.is_empty() {
+    let cfg = app.config();
+    if cfg.admin_token.is_empty() {
         return Ok(());
     }
     let header = req.header("Authorization").unwrap_or("");
-    if header.strip_prefix("Bearer ") == Some(&cfg_token) {
+    if header.strip_prefix("Bearer ") == Some(cfg.admin_token.as_str()) {
         Ok(())
     } else {
         Err(())
@@ -273,7 +273,7 @@ fn register_handlers(
                     // the stored value (the SPA gets a redacted view on
                     // GET, so blank password / key fields in the form are
                     // the default state, not an explicit clear).
-                    let mut current = app.config();
+                    let mut current = (*app.config()).clone();
                     current.merge_preserving_secrets(u.0);
                     // Persist to NVS inline. PUTs are rare (a user clicking
                     // Save) so the ~50-200 ms NVS write latency is fine,
@@ -727,7 +727,7 @@ where
                 return Ok(());
             }
         };
-        let mut cfg = app_put.config();
+        let mut cfg = (*app_put.config()).clone();
         apply(&mut cfg, section);
         if let Err(e) = cfg.save(&*nvs) {
             log::error!("config[{path}]: NVS save failed: {e}");

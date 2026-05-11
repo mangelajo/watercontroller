@@ -107,7 +107,7 @@ async fn put_config(
     State(s): State<Arc<AppState>>,
     Json(update): Json<ConfigUpdate>,
 ) -> impl IntoResponse {
-    let mut current = s.app.config();
+    let mut current = (*s.app.config()).clone();
     current.merge_preserving_secrets(update.0);
     s.app.replace_config(current);
     StatusCode::NO_CONTENT
@@ -131,7 +131,7 @@ async fn get_wifi(State(s): State<Arc<AppState>>) -> Json<WifiConfig> {
     Json(s.app.config().redact_secrets_for_api().wifi)
 }
 async fn put_wifi(State(s): State<Arc<AppState>>, Json(mut new): Json<WifiConfig>) -> impl IntoResponse {
-    let mut cfg = s.app.config();
+    let mut cfg = (*s.app.config()).clone();
     for net in new.networks.iter_mut() {
         if net.password.is_empty() {
             if let Some(o) = cfg.wifi.networks.iter().find(|n| n.ssid == net.ssid) {
@@ -140,10 +140,11 @@ async fn put_wifi(State(s): State<Arc<AppState>>, Json(mut new): Json<WifiConfig
         }
     }
     cfg.wifi = new;
-    s.app.replace_config(cfg.clone());
+    let networks = cfg.wifi.networks.clone();
+    s.app.replace_config(cfg);
     // Mirror the firmware path: any wifi-config save kicks the supervisor
     // to (re)evaluate the network list and switch AP↔STA as needed.
-    s.wifi.connect(&cfg.wifi.networks);
+    s.wifi.connect(&networks);
     StatusCode::NO_CONTENT
 }
 
@@ -151,7 +152,7 @@ async fn get_mqtt(State(s): State<Arc<AppState>>) -> Json<MqttConfig> {
     Json(s.app.config().redact_secrets_for_api().mqtt)
 }
 async fn put_mqtt(State(s): State<Arc<AppState>>, Json(mut new): Json<MqttConfig>) -> impl IntoResponse {
-    let mut cfg = s.app.config();
+    let mut cfg = (*s.app.config()).clone();
     if new.password.is_empty() { new.password = cfg.mqtt.password.clone(); }
     if new.client_key_pem.is_empty() { new.client_key_pem = cfg.mqtt.client_key_pem.clone(); }
     cfg.mqtt = new;
@@ -160,30 +161,30 @@ async fn put_mqtt(State(s): State<Arc<AppState>>, Json(mut new): Json<MqttConfig
 }
 
 async fn get_switches(State(s): State<Arc<AppState>>) -> Json<SwitchesConfig> {
-    Json(s.app.config().switches)
+    Json(s.app.config().switches.clone())
 }
 async fn put_switches(State(s): State<Arc<AppState>>, Json(new): Json<SwitchesConfig>) -> impl IntoResponse {
-    let mut cfg = s.app.config();
+    let mut cfg = (*s.app.config()).clone();
     cfg.switches = new;
     s.app.replace_config(cfg);
     StatusCode::NO_CONTENT
 }
 
 async fn get_sensors(State(s): State<Arc<AppState>>) -> Json<SensorsConfig> {
-    Json(s.app.config().sensors)
+    Json(s.app.config().sensors.clone())
 }
 async fn put_sensors(State(s): State<Arc<AppState>>, Json(new): Json<SensorsConfig>) -> impl IntoResponse {
-    let mut cfg = s.app.config();
+    let mut cfg = (*s.app.config()).clone();
     cfg.sensors = new;
     s.app.replace_config(cfg);
     StatusCode::NO_CONTENT
 }
 
 async fn get_schedule(State(s): State<Arc<AppState>>) -> Json<Schedule> {
-    Json(s.app.config().schedule)
+    Json(s.app.config().schedule.clone())
 }
 async fn put_schedule(State(s): State<Arc<AppState>>, Json(new): Json<Schedule>) -> impl IntoResponse {
-    let mut cfg = s.app.config();
+    let mut cfg = (*s.app.config()).clone();
     cfg.schedule = new;
     s.app.replace_config(cfg);
     StatusCode::NO_CONTENT
@@ -193,7 +194,7 @@ async fn get_https(State(s): State<Arc<AppState>>) -> Json<HttpsConfig> {
     Json(s.app.config().redact_secrets_for_api().https)
 }
 async fn put_https(State(s): State<Arc<AppState>>, Json(mut new): Json<HttpsConfig>) -> impl IntoResponse {
-    let mut cfg = s.app.config();
+    let mut cfg = (*s.app.config()).clone();
     if new.key_pem.is_empty() { new.key_pem = cfg.https.key_pem.clone(); }
     cfg.https = new;
     s.app.replace_config(cfg);
@@ -204,7 +205,7 @@ async fn get_wg(State(s): State<Arc<AppState>>) -> Json<WireguardConfig> {
     Json(s.app.config().redact_secrets_for_api().wireguard)
 }
 async fn put_wg(State(s): State<Arc<AppState>>, Json(mut new): Json<WireguardConfig>) -> impl IntoResponse {
-    let mut cfg = s.app.config();
+    let mut cfg = (*s.app.config()).clone();
     if new.private_key.is_empty() { new.private_key = cfg.wireguard.private_key.clone(); }
     if new.peer_preshared_key.is_empty() {
         new.peer_preshared_key = cfg.wireguard.peer_preshared_key.clone();
@@ -216,10 +217,13 @@ async fn put_wg(State(s): State<Arc<AppState>>, Json(mut new): Json<WireguardCon
 
 async fn get_time(State(s): State<Arc<AppState>>) -> Json<TimeSection> {
     let cfg = s.app.config();
-    Json(TimeSection { timezone: cfg.timezone, sntp_servers: cfg.sntp_servers })
+    Json(TimeSection {
+        timezone: cfg.timezone.clone(),
+        sntp_servers: cfg.sntp_servers.clone(),
+    })
 }
 async fn put_time(State(s): State<Arc<AppState>>, Json(new): Json<TimeSection>) -> impl IntoResponse {
-    let mut cfg = s.app.config();
+    let mut cfg = (*s.app.config()).clone();
     cfg.timezone = new.timezone;
     cfg.sntp_servers = new.sntp_servers;
     s.app.replace_config(cfg);
@@ -231,7 +235,7 @@ async fn get_auth(State(_s): State<Arc<AppState>>) -> Json<AuthSection> {
     Json(AuthSection { admin_token: String::new() })
 }
 async fn put_auth(State(s): State<Arc<AppState>>, Json(new): Json<AuthSection>) -> impl IntoResponse {
-    let mut cfg = s.app.config();
+    let mut cfg = (*s.app.config()).clone();
     if !new.admin_token.is_empty() {
         cfg.admin_token = new.admin_token;
     }

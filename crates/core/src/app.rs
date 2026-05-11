@@ -29,7 +29,12 @@ pub struct App {
 struct AppInner {
     clock: Arc<dyn Clock>,
     state: DeviceState,
-    config: Mutex<Config>,
+    // Wrapped in `Arc` so `config()` returns a cheap refcount-bump
+    // (~16 B stack, no heap traversal) instead of cloning the entire
+    // Config — which contains the HTTPS PEM cert + key, MQTT TLS
+    // material, schedule rules, etc. and runs ~6–10 KiB. Callers that
+    // need to mutate explicitly `(*app.config()).clone()` first.
+    config: Mutex<Arc<Config>>,
     valve: Mutex<WaterValve>,
     sprinkler1: Mutex<TimedSwitch>,
     sprinkler2: Mutex<TimedSwitch>,
@@ -76,7 +81,7 @@ impl App {
             inner: Arc::new(AppInner {
                 clock,
                 state: DeviceState::new(),
-                config: Mutex::new(config),
+                config: Mutex::new(Arc::new(config)),
                 valve: Mutex::new(valve),
                 sprinkler1: Mutex::new(s1),
                 sprinkler2: Mutex::new(s2),
@@ -105,7 +110,12 @@ impl App {
         self.inner.state.update(f);
     }
 
-    pub fn config(&self) -> Config {
+    /// Snapshot of the current config. Returns an `Arc<Config>` — readers
+    /// pay only a refcount bump, not a full clone of the (kilobyte-sized)
+    /// Config struct. To mutate, do `let mut cfg = (*app.config()).clone();
+    /// cfg.x = …; app.replace_config(cfg);` so the clone is explicit at
+    /// the callsite that needs it.
+    pub fn config(&self) -> Arc<Config> {
         self.inner.config.lock().unwrap().clone()
     }
 
@@ -125,7 +135,7 @@ impl App {
         self.inner.sprinkler2.lock().unwrap()
             .set_auto_off(auto_off_or_none(cfg.switches.sprinkler_2_auto_off_secs));
         self.inner.valve.lock().unwrap().set_timing(cfg.switches.valve_timing);
-        *self.inner.config.lock().unwrap() = cfg;
+        *self.inner.config.lock().unwrap() = Arc::new(cfg);
     }
 
     /// Fire a scheduled sprinkler activation with an optional per-run
@@ -310,7 +320,7 @@ mod tests {
         assert!(app.snapshot().switches.sprinkler_1);
 
         // Live-tighten auto-off to 2 minutes.
-        let mut cfg = app.config();
+        let mut cfg = (*app.config()).clone();
         cfg.switches.sprinkler_1_auto_off_secs = 120;
         app.replace_config(cfg);
 

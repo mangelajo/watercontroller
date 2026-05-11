@@ -34,14 +34,13 @@ pub fn spawn(
     nvs: Arc<dyn NvsStore>,
     wifi: Arc<dyn Wifi>,
 ) {
-    // 12 KiB — `app.config()` clones a Config containing several PEM
-    // blobs (HTTPS cert+key, MQTT TLS, Wireguard keys) plus the
-    // serialized print frame for each network row in `list_networks`.
-    // The deepest path is `wifi.scan()` which traverses the
-    // supervisor's request channel + result-formatting too. 8 KiB
-    // worked for trivial dispatch but tripped occasional stack
-    // overflow on `wifi list` / `wifi scan` from automated runs.
-    crate::task_util::spawn_named(c"serial-cli", 12 * 1024, move || {
+    // 8 KiB. Read-only paths (`wifi list`, `state`) now read through
+    // an `Arc<Config>` returned by `App::config()` — no full Config
+    // clone, just a refcount bump. Mutation paths (`wifi add/del/
+    // clear`) still do an explicit `(*app.config()).clone()` to get
+    // an owned Config for the mutation, but those run on a flat call
+    // chain (no nested format machinery), so they fit comfortably.
+    crate::task_util::spawn_named(c"serial-cli", 8 * 1024, move || {
         run(app, nvs, wifi);
     });
 }
@@ -204,7 +203,7 @@ fn modify_networks<F>(
 where
     F: FnOnce(&mut Vec<WifiCreds>) -> String,
 {
-    let mut cfg = app.config();
+    let mut cfg = (*app.config()).clone();
     let summary = f(&mut cfg.wifi.networks);
     if let Err(e) = cfg.save(&**nvs) {
         println!(">> nvs save failed: {e}");
