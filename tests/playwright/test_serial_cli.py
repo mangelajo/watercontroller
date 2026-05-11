@@ -36,7 +36,24 @@ def console(jumpstarter_client, real_target_url, term):
     _ = real_target_url  # only bound to force the device-setup dependency
     term("cli: attaching pexpect adapter over client.serial")
     with PexpectAdapter(client=jumpstarter_client.serial) as c:
-        yield Narrator(c, term)
+        n = Narrator(c, term)
+        # Quiet info-level chatter (heartbeats, wifi events, https
+        # handshakes) for the duration of the test so they don't
+        # interleave with the `>>` lines we're matching on.
+        try:
+            n.sendline("log warn")
+            n.expect(rb">> log level set to warn", timeout=5)
+        except Exception:
+            term("cli: warn-level set attempt failed (older firmware?) — continuing")
+        try:
+            yield n
+        finally:
+            # Best-effort restore so other channels (manual serial,
+            # different test session) see default verbosity.
+            try:
+                n.sendline("log info")
+            except Exception:
+                pass
     term("cli: console detached")
 
 
@@ -110,6 +127,27 @@ def test_serial_cli_wifi_list(console):
 def test_serial_cli_unknown_command(console):
     console.sendline("bogus_command_xyz")
     console.expect(rb">> unknown command: bogus_command_xyz", timeout=20)
+
+
+def test_serial_cli_tasks(console):
+    """`tasks` prints a tabulated task list. We don't assert exact stack
+    numbers (they're per-build) but we expect the header row, a
+    separator, and at least one named task we know to exist."""
+    console.sendline("tasks")
+    console.expect(rb">> NAME\s+STATE\s+PRI\s+STACK_FREE\s+RUNTIME", timeout=10)
+    console.expect(rb"-{20,}", timeout=5)
+    console.expect(rb"wifi-sup\s+\S+\s+\d+\s+\d+\s+\d+", timeout=5)
+
+
+def test_serial_cli_mem(console):
+    """`mem` prints heap stats with thousands separators. The label
+    width varies per row (longer labels eat the colon padding), so we
+    match colon with `\\s*` rather than `\\s+`."""
+    console.sendline("mem")
+    console.expect(rb">> heap:", timeout=10)
+    console.expect(rb">>\s+total free\s*:\s+[\d,]+ B", timeout=5)
+    console.expect(rb">>\s+largest free block\s*:\s+[\d,]+ B", timeout=5)
+    console.expect(rb">>\s+min-ever free\s*:\s+[\d,]+ B", timeout=5)
 
 
 def test_serial_cli_log_level(console):

@@ -140,84 +140,119 @@ fn run(
 ) -> Result<()> {
     let mut wifi = BlockingWifi::wrap(EspWifi::new(modem, sys_loop.clone(), Some(nvs))?, sys_loop)?;
 
+    // Each "phase" is its own `#[inline(never)]` function so the locals
+    // they need — `WifiState` enum variants (Strings on the stack),
+    // 2-arg `log::info!` format buffers, IpAddr-to-String conversion,
+    // etc. — only live while that phase is on the stack. Without the
+    // split, Rust's prologue would reserve space for *all* phases at
+    // entry to `run()` and the wifi-sup task would sit close to its
+    // 16 KiB ceiling forever.
     loop {
         let networks = sup.networks.lock().unwrap().clone();
         *sup.rescan_signal.lock().unwrap() = false;
 
-        let mut connected = false;
-        for creds in &networks {
-            log::info!("wifi: trying {}", creds.ssid);
-            sup.set_state(WifiState::Connecting { ssid: creds.ssid.clone() });
-            if try_connect_sta(&mut wifi, creds).is_ok() {
-                let ip = ip_string(&wifi);
-                log::info!("wifi: connected to {} ({ip})", creds.ssid);
-                sup.set_state(WifiState::Connected {
-                    ssid: creds.ssid.clone(),
-                    ip,
-                });
-                connected = true;
-                break;
-            }
-            log::warn!("wifi: connect to {} failed", creds.ssid);
-        }
-
+        let connected = try_connect_any(&sup, &mut wifi, &networks);
         if connected {
-            // Stay connected. Every 30 s poll the AP record for RSSI + as a
-            // health probe: get_ap_info() returns NOT_CONNECT (12303) when the
-            // driver knows the link is gone, which catches silent AP drops
-            // that don't fire WIFI_EVENT_STA_DISCONNECTED. 3 consecutive
-            // failures force a reconnect.
-            let mut probe_fails: u32 = 0;
-            let mut ticks: u32 = 0;
-            while wifi.is_connected().unwrap_or(false) {
-                serve_scan_request(&sup, &mut wifi);
-                if *sup.rescan_signal.lock().unwrap() {
-                    break;
-                }
-                thread::sleep(Duration::from_secs(5));
-                ticks += 1;
-                if ticks % 6 == 0 && !probe_link(&mut wifi, &mut probe_fails) {
-                    break;
-                }
-            }
-            log::warn!("wifi: link lost, rescanning");
+            run_connected(&sup, &mut wifi);
         } else if !networks.is_empty() {
-            // No known SSID was reachable — bring up AP fallback so the user
-            // can still reach the device for re-provisioning.
-            log::warn!(
-                "wifi: no known SSIDs reachable; entering AP mode '{}'",
-                sup.ap_ssid
-            );
-            if start_ap(&mut wifi, &sup.ap_ssid, &sup.ap_password).is_ok() {
-                sup.set_state(WifiState::ApMode {
-                    ssid: sup.ap_ssid.clone(),
-                    ip: "192.168.4.1".into(),
-                });
-            }
-            // Rescan loop: every SCAN_LOOP_INTERVAL or on explicit rescan signal.
-            let mut waited = Duration::ZERO;
-            while !*sup.rescan_signal.lock().unwrap() && waited < SCAN_LOOP_INTERVAL {
-                serve_scan_request(&sup, &mut wifi);
-                thread::sleep(Duration::from_secs(2));
-                waited += Duration::from_secs(2);
-            }
-            // Take down AP before retrying STA.
-            let _ = wifi.stop();
+            run_ap_fallback(&sup, &mut wifi);
         } else {
-            // No networks configured at all — sit in AP mode permanently.
-            if start_ap(&mut wifi, &sup.ap_ssid, &sup.ap_password).is_ok() {
-                sup.set_state(WifiState::ApMode {
-                    ssid: sup.ap_ssid.clone(),
-                    ip: "192.168.4.1".into(),
-                });
-            }
-            // Wait for a `connect()` call from the API to add networks.
-            while !*sup.rescan_signal.lock().unwrap() {
-                serve_scan_request(&sup, &mut wifi);
-                thread::sleep(Duration::from_secs(2));
-            }
-            let _ = wifi.stop();
+            run_ap_permanent(&sup, &mut wifi);
         }
+    }
+}
+
+/// Walk the saved network list and return on the first successful STA
+/// association. Returns `false` if none worked.
+#[inline(never)]
+fn try_connect_any(
+    sup: &Arc<WifiSupervisor>,
+    wifi: &mut BlockingWifi<EspWifi<'static>>,
+    networks: &[WifiCreds],
+) -> bool {
+    for creds in networks {
+        log::info!("wifi: trying {}", creds.ssid);
+        sup.set_state(WifiState::Connecting { ssid: creds.ssid.clone() });
+        if try_connect_sta(wifi, creds).is_ok() {
+            announce_connected(sup, wifi, &creds.ssid);
+            return true;
+        }
+        log::warn!("wifi: connect to {} failed", creds.ssid);
+    }
+    false
+}
+
+/// Format + announce the "connected" state. Single-arg log here so the
+/// format-buffer cost stays bounded; the 2-arg "connected to {} ({ip})"
+/// line we used to have inlined into `run()` was a ~1.5 KiB stack peak
+/// that persisted as part of `run()`'s prologue allocation.
+#[inline(never)]
+fn announce_connected(
+    sup: &Arc<WifiSupervisor>,
+    wifi: &BlockingWifi<EspWifi<'static>>,
+    ssid: &str,
+) {
+    let ip = ip_string(wifi);
+    log::info!("wifi: connected ssid={ssid} ip={ip}");
+    sup.set_state(WifiState::Connected { ssid: ssid.into(), ip });
+}
+
+/// Stay-connected loop: every 5 s tick checks for a scan request and the
+/// rescan signal; every 30 s runs the link probe.
+#[inline(never)]
+fn run_connected(sup: &Arc<WifiSupervisor>, wifi: &mut BlockingWifi<EspWifi<'static>>) {
+    let mut probe_fails: u32 = 0;
+    let mut ticks: u32 = 0;
+    while wifi.is_connected().unwrap_or(false) {
+        serve_scan_request(sup, wifi);
+        if *sup.rescan_signal.lock().unwrap() {
+            break;
+        }
+        thread::sleep(Duration::from_secs(5));
+        ticks += 1;
+        if ticks % 6 == 0 && !probe_link(wifi, &mut probe_fails) {
+            break;
+        }
+    }
+    log::warn!("wifi: link lost, rescanning");
+}
+
+/// AP-mode fallback after a failed connect attempt: hold for
+/// `SCAN_LOOP_INTERVAL` then retry STA.
+#[inline(never)]
+fn run_ap_fallback(sup: &Arc<WifiSupervisor>, wifi: &mut BlockingWifi<EspWifi<'static>>) {
+    enter_ap_mode(sup, wifi);
+    let mut waited = Duration::ZERO;
+    while !*sup.rescan_signal.lock().unwrap() && waited < SCAN_LOOP_INTERVAL {
+        serve_scan_request(sup, wifi);
+        thread::sleep(Duration::from_secs(2));
+        waited += Duration::from_secs(2);
+    }
+    let _ = wifi.stop();
+}
+
+/// Permanent AP mode used when no networks are configured at all.
+/// Waits on `rescan_signal` (a `connect()` from the API or CLI) before
+/// returning to the supervisor loop.
+#[inline(never)]
+fn run_ap_permanent(sup: &Arc<WifiSupervisor>, wifi: &mut BlockingWifi<EspWifi<'static>>) {
+    enter_ap_mode(sup, wifi);
+    while !*sup.rescan_signal.lock().unwrap() {
+        serve_scan_request(sup, wifi);
+        thread::sleep(Duration::from_secs(2));
+    }
+    let _ = wifi.stop();
+}
+
+/// Bring up the AP and publish the corresponding `WifiState`.
+#[inline(never)]
+fn enter_ap_mode(sup: &Arc<WifiSupervisor>, wifi: &mut BlockingWifi<EspWifi<'static>>) {
+    log::warn!("wifi: entering AP mode ssid={}", sup.ap_ssid);
+    if start_ap(wifi, &sup.ap_ssid, &sup.ap_password).is_ok() {
+        sup.set_state(WifiState::ApMode {
+            ssid: sup.ap_ssid.clone(),
+            ip: "192.168.4.1".into(),
+        });
     }
 }
 
@@ -306,6 +341,7 @@ fn auth_label(auth: Option<AuthMethod>) -> String {
     .into()
 }
 
+#[inline(never)]
 fn try_connect_sta(wifi: &mut BlockingWifi<EspWifi<'static>>, creds: &WifiCreds) -> Result<()> {
     let cfg = Configuration::Client(ClientConfiguration {
         ssid: creds.ssid.as_str().try_into().map_err(|_| anyhow::anyhow!("ssid too long"))?,
@@ -346,6 +382,7 @@ fn wait_for_ip(wifi: &BlockingWifi<EspWifi<'static>>, secs: u8) -> Result<()> {
     Err(anyhow::anyhow!("no link"))
 }
 
+#[inline(never)]
 fn start_ap(
     wifi: &mut BlockingWifi<EspWifi<'static>>,
     ssid: &str,
@@ -369,6 +406,7 @@ fn start_ap(
     Ok(())
 }
 
+#[inline(never)]
 fn ip_string(wifi: &BlockingWifi<EspWifi<'static>>) -> String {
     wifi.wifi()
         .sta_netif()

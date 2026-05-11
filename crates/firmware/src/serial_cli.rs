@@ -18,6 +18,8 @@
 //!   wifi scan                   — discover nearby APs
 //!   ap-info                     — current AP fallback SSID
 //!   log <level>                 — set log verbosity (off/error/warn/info/debug/trace)
+//!   tasks                       — tabulated task list (name, state, priority, stack free)
+//!   mem                         — heap statistics (free, allocated, largest block, min-ever)
 //!   reset                       — soft reboot
 //!   factory_reset               — wipe NVS config and reboot
 //!
@@ -177,6 +179,8 @@ fn dispatch(cmd: &str, app: &App, nvs: &Arc<dyn NvsStore>, wifi: &Arc<dyn Wifi>)
                 None => println!(">> usage: log <off|error|warn|info|debug|trace>"),
             }
         }
+        Some("tasks") => print_tasks(),
+        Some("mem") => print_mem(),
         Some("ap-info") => {
             let cfg = app.config();
             println!(">> ap_ssid: {} (password set: {})", cfg.wifi.ap_ssid, !cfg.wifi.ap_password.is_empty());
@@ -213,6 +217,8 @@ fn print_help() {
 >>   wifi scan                   discover nearby APs\n\
 >>   ap-info                     show AP fallback SSID\n\
 >>   log <level>                 set log verbosity (off/error/warn/info/debug/trace)\n\
+>>   tasks                       tabulated task list (name/state/pri/stack free)\n\
+>>   mem                         heap stats (free/allocated/largest/min-ever)\n\
 >>   reset                       reboot\n\
 >>   factory_reset               wipe NVS config + reboot";
     println!("{help}");
@@ -256,6 +262,65 @@ fn list_networks(app: &App) {
         let pw = if n.password.is_empty() { "<open>" } else { "<set>" };
         println!(">>   [{i}] ssid={} password={pw}", n.ssid);
     }
+}
+
+/// Tabulated task list — same data as `/api/diag`. Columns sized for a
+/// typical 80-col terminal; long task names are truncated to keep the
+/// alignment. `#[inline(never)]` so the snapshot's Vec + per-row format
+/// frame doesn't bloat the dispatch parent.
+#[inline(never)]
+fn print_tasks() {
+    let snap = crate::diag::snapshot();
+    println!(
+        ">> {:<16} {:<10} {:>3} {:>10} {:>12}",
+        "NAME", "STATE", "PRI", "STACK_FREE", "RUNTIME"
+    );
+    println!(">> {}", "-".repeat(56));
+    // Sort by stack-min-free ascending: the most-pressured task surfaces
+    // at the top, which is what you usually want when running `tasks`
+    // to debug a near-overflow.
+    let mut rows = snap.tasks;
+    rows.sort_by_key(|t| t.stack_min_free_bytes);
+    for t in rows {
+        let name: String = t.name.chars().take(16).collect();
+        println!(
+            ">> {:<16} {:<10} {:>3} {:>10} {:>12}",
+            name, t.state, t.priority, t.stack_min_free_bytes, t.run_time
+        );
+    }
+}
+
+/// Heap statistics — same data as `/api/diag`. Numbers are aligned right
+/// with thousands separators for readability.
+#[inline(never)]
+fn print_mem() {
+    let snap = crate::diag::snapshot();
+    let h = &snap.heap;
+    println!(">> heap:");
+    println!(">>   total free        : {:>12} B", with_commas(h.total_free_bytes));
+    println!(">>   total allocated   : {:>12} B", with_commas(h.total_allocated_bytes));
+    println!(">>   largest free block: {:>12} B", with_commas(h.largest_free_block));
+    println!(">>   min-ever free     : {:>12} B", with_commas(h.min_ever_free_bytes));
+}
+
+/// Tiny stack-only thousands separator. Avoids pulling in heavyweight
+/// `format!` paths on the serial-cli task: builds a `String` from the
+/// digits in reverse, inserting `,` every 3.
+fn with_commas(mut n: usize) -> String {
+    if n == 0 {
+        return "0".into();
+    }
+    let mut digits = String::with_capacity(20);
+    let mut i = 0;
+    while n > 0 {
+        if i > 0 && i % 3 == 0 {
+            digits.push(',');
+        }
+        digits.push((b'0' + (n % 10) as u8) as char);
+        n /= 10;
+        i += 1;
+    }
+    digits.chars().rev().collect()
 }
 
 /// Apply a mutation to the network list, persist, and signal the supervisor.
