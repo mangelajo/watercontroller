@@ -23,8 +23,9 @@
 //! Output prefix `>>` so the human reading the pipe can distinguish CLI
 //! responses from regular log lines.
 
-use std::io::{BufRead, BufReader};
+use std::io::{Read, Write};
 use std::sync::Arc;
+use std::time::Duration;
 use watercontroller_core::app::App;
 use watercontroller_core::config::Config;
 use watercontroller_core::traits::{NvsStore, Wifi, WifiCreds};
@@ -47,29 +48,59 @@ pub fn spawn(
 
 fn run(app: App, nvs: Arc<dyn NvsStore>, wifi: Arc<dyn Wifi>) {
     println!(">> serial CLI ready — type `help`");
-    let stdin = std::io::stdin();
-    let mut reader = BufReader::new(stdin);
-    let mut line = String::new();
+    // ESP-IDF's UART stdio has no line discipline: `read_line` returns
+    // whatever bytes the VFS driver flushed since the last poll, with no
+    // guarantee a `\n` is included. Slow typing means each keystroke
+    // returns alone and `read_line` treats every byte as a complete
+    // (empty-suffixed) line, dispatching `s`, `t`, `a`, … as separate
+    // commands. And the driver doesn't echo by default — the user
+    // can't see what they typed.
+    //
+    // So we do our own line discipline: read 1 byte at a time, echo it,
+    // accumulate into a `String`, dispatch on CR/LF. Backspace deletes
+    // the last char and emits a destructive sequence to the terminal.
+    let mut buf = String::with_capacity(128);
+    let mut byte = [0u8; 1];
+    let mut stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    let _ = write!(stdout, "> ");
+    let _ = stdout.flush();
     loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => {
-                // EOF on stdin — happens on some terminal disconnects.
-                // Sleep and retry rather than spinning.
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                continue;
-            }
-            Ok(_) => {}
-            Err(_) => {
-                std::thread::sleep(std::time::Duration::from_millis(500));
+        match stdin.read(&mut byte) {
+            Ok(1) => {}
+            Ok(_) | Err(_) => {
+                std::thread::sleep(Duration::from_millis(50));
                 continue;
             }
         }
-        let cmd = line.trim();
-        if cmd.is_empty() {
-            continue;
+        match byte[0] {
+            b'\r' | b'\n' => {
+                let _ = writeln!(stdout);
+                let _ = stdout.flush();
+                if !buf.is_empty() {
+                    dispatch(buf.trim(), &app, &nvs, &wifi);
+                    buf.clear();
+                }
+                let _ = write!(stdout, "> ");
+                let _ = stdout.flush();
+            }
+            0x08 | 0x7f => {
+                // backspace / DEL — destructive: erase last char on
+                // the user's terminal too.
+                if buf.pop().is_some() {
+                    let _ = stdout.write_all(b"\x08 \x08");
+                    let _ = stdout.flush();
+                }
+            }
+            c if (0x20..=0x7e).contains(&c) => {
+                buf.push(c as char);
+                // Echo printable. Most terminals expect this.
+                let _ = stdout.write_all(&[c]);
+                let _ = stdout.flush();
+            }
+            // Ignore other control bytes (tab, escape sequences, etc.).
+            _ => {}
         }
-        dispatch(cmd, &app, &nvs, &wifi);
     }
 }
 
