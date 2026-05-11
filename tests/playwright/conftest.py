@@ -41,6 +41,15 @@ DEVICE_BOOT_TIMEOUT_S = float(os.environ.get("WC_DEVICE_BOOT_TIMEOUT_S", "45"))
 # after we drop a fresh build into ota_0.
 _OTADATA_OFFSET = "0xf000"
 _OTADATA_SIZE = 0x2000
+
+# `partitions.csv`: nvs sits at 0x9000, size 0x6000. Wiping it makes the
+# firmware fall back to compile-time defaults (Config::default()) and
+# the build-time WiFi seed baked from .env, which gives deterministic
+# starting state for every test run. Without this, a previous test that
+# saved e.g. sprinkler auto-off = 3 minutes via /api/config/switches
+# would persist and break later sessions that assume default 7 min.
+_NVS_OFFSET = "0x9000"
+_NVS_SIZE = 0x6000
 # Pattern esp_netif prints to UART once DHCP lands. The supervisor's
 # follow-up `wifi: connected to <ssid> (<ip>)` line is also a fine
 # anchor; we pick the lower-level one because it appears before the
@@ -116,11 +125,20 @@ def _flash_and_detect_ip(client, log) -> str:
     # Reset the OTA selector before flashing the app slot. Otherwise a
     # device that previously OTA'd into ota_1 keeps booting the stale
     # ota_1 image, even when we just dropped a fresh build into ota_0.
-    blank = REPO_ROOT / "target/firmware/otadata_blank.bin"
-    blank.parent.mkdir(parents=True, exist_ok=True)
-    blank.write_bytes(b"\xff" * _OTADATA_SIZE)
+    blank_otadata = REPO_ROOT / "target/firmware/otadata_blank.bin"
+    blank_otadata.parent.mkdir(parents=True, exist_ok=True)
+    blank_otadata.write_bytes(b"\xff" * _OTADATA_SIZE)
     log(f"device-setup: wiping otadata @ {_OTADATA_OFFSET}")
-    client.esp32.flash(str(blank), target=_OTADATA_OFFSET)
+    client.esp32.flash(str(blank_otadata), target=_OTADATA_OFFSET)
+
+    # Wipe NVS so the firmware boots from compile-time defaults +
+    # build-time wifi seed (.env). Without this, NVS state persists
+    # across sessions (saved sprinkler auto-off, OTA'd cert/key, custom
+    # wifi networks) and breaks tests that assume defaults.
+    blank_nvs = REPO_ROOT / "target/firmware/nvs_blank.bin"
+    blank_nvs.write_bytes(b"\xff" * _NVS_SIZE)
+    log(f"device-setup: wiping nvs @ {_NVS_OFFSET}")
+    client.esp32.flash(str(blank_nvs), target=_NVS_OFFSET)
 
     log(f"device-setup: flashing {APP_BIN.name} @ 0x20000 ({APP_BIN.stat().st_size:,} B)")
     client.esp32.flash(str(APP_BIN), target="0x20000")

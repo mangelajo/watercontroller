@@ -34,9 +34,14 @@ pub fn spawn(
     nvs: Arc<dyn NvsStore>,
     wifi: Arc<dyn Wifi>,
 ) {
-    // 8 KiB matches log_telnet — the deepest call chain here is `wifi.scan`
-    // returning + formatting a result line, which we keep single-arg.
-    crate::task_util::spawn_named(c"serial-cli", 8 * 1024, move || {
+    // 12 KiB — `app.config()` clones a Config containing several PEM
+    // blobs (HTTPS cert+key, MQTT TLS, Wireguard keys) plus the
+    // serialized print frame for each network row in `list_networks`.
+    // The deepest path is `wifi.scan()` which traverses the
+    // supervisor's request channel + result-formatting too. 8 KiB
+    // worked for trivial dispatch but tripped occasional stack
+    // overflow on `wifi list` / `wifi scan` from automated runs.
+    crate::task_util::spawn_named(c"serial-cli", 12 * 1024, move || {
         run(app, nvs, wifi);
     });
 }

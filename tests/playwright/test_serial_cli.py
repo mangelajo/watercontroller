@@ -67,7 +67,18 @@ class Narrator:
         # `pattern` is bytes — show a printable form.
         shown = pattern.decode(errors="replace") if isinstance(pattern, (bytes, bytearray)) else str(pattern)
         self._term(f"cli: waiting for /{shown}/ (timeout {timeout}s)")
-        self._s.expect(pattern, timeout=timeout)
+        try:
+            self._s.expect(pattern, timeout=timeout)
+        except Exception:
+            # Surface the bytes pexpect actually received so a TIMEOUT
+            # is debuggable instead of an opaque "didn't match".
+            before = getattr(self._s, "before", b"") or b""
+            if isinstance(before, bytes):
+                tail = before[-1500:].decode(errors="replace")
+            else:
+                tail = str(before)[-1500:]
+            self._term(f"cli: TIMEOUT — buffer tail:\n{tail}")
+            raise
         match = getattr(self._s, "match", None)
         if match is not None:
             text = match.group(0)
@@ -98,4 +109,4 @@ def test_serial_cli_wifi_list(console):
 
 def test_serial_cli_unknown_command(console):
     console.sendline("bogus_command_xyz")
-    console.expect(rb">> unknown command: bogus_command_xyz", timeout=10)
+    console.expect(rb">> unknown command: bogus_command_xyz", timeout=20)

@@ -60,7 +60,13 @@ def test_wifi_scan_button_lists_results_and_can_pick(page, host_url: str):
     page.click('button[data-tab="wifi"]')
     page.click("#wifi-scan")
 
-    expect(page.locator("#wifi-scan-msg")).to_contain_text(re.compile(r"\d+ network"))
+    # The real device's scan takes several seconds (esp_wifi_scan_start
+    # does a full active scan across all channels + the supervisor's
+    # poll loop). Default 5 s is plenty for FakeWifi but not for real
+    # hardware; 20 s is comfortable on both.
+    expect(page.locator("#wifi-scan-msg")).to_contain_text(
+        re.compile(r"\d+ network"), timeout=20_000
+    )
     rows = page.locator("#wifi-scan-results .list-row")
     # ≥1 row on any reasonable network. Use to_have_count(N, timeout=…)
     # implicitly via a wait_for. The .first locator below also waits.
