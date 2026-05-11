@@ -163,6 +163,15 @@ def term(pytestconfig):
 
 
 @pytest.fixture(scope="session")
+def on_real_device(real_target_url) -> bool:
+    """`True` when tests are running against a flashed ESP32 (either via
+    `JUMPSTARTER_HOST` or an explicit `WC_TEST_TARGET_URL`). Used by
+    tests that assert on host-only behaviour like FakeWifi's stub
+    network list, so they can adapt or skip on real hardware."""
+    return real_target_url is not None
+
+
+@pytest.fixture(scope="session")
 def real_target_url(jumpstarter_client, term) -> str | None:
     """Resolve where the test session should run:
 

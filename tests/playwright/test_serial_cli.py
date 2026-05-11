@@ -51,6 +51,15 @@ class Narrator:
         self._term = term
 
     def sendline(self, line: str) -> None:
+        # Drain any pending bytes from the previous test / unrelated
+        # heartbeat output so they don't get consumed by the next
+        # `expect()` call. read_nonblocking with timeout=0 returns
+        # whatever's currently buffered without waiting.
+        try:
+            while True:
+                self._s.read_nonblocking(size=4096, timeout=0)
+        except Exception:
+            pass
         self._term(f"cli: >>> {line}")
         self._s.sendline(line)
 

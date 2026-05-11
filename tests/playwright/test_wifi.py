@@ -5,24 +5,41 @@ from __future__ import annotations
 
 import re
 
+import pytest
 from playwright.sync_api import APIRequestContext, expect
 
 
 # --- API-level ---------------------------------------------------------------
 
-def test_wifi_scan_endpoint_returns_fake_list(host_url: str, api_request_context: APIRequestContext):
+def test_wifi_scan_endpoint_schema(host_url: str, api_request_context: APIRequestContext):
+    """Endpoint always answers with a `networks: []` envelope and each
+    entry has the four fields the SPA depends on. Doesn't assert on SSID
+    names — those are FakeWifi stubs on the host build but real
+    neighbourhood APs on a flashed device, so they're not portable."""
     r = api_request_context.get(f"{host_url}/api/wifi/scan")
     assert r.ok, r.text()
     body = r.json()
     assert "networks" in body
-    ssids = {n["ssid"] for n in body["networks"]}
-    assert "FakeNet-2.4G" in ssids
-    assert "FakeNet-Guest" in ssids
-    # Schema sanity — each entry must have the four fields the SPA depends on.
     for net in body["networks"]:
+        assert isinstance(net["ssid"], str)
         assert isinstance(net["rssi_dbm"], int)
         assert isinstance(net["channel"], int)
         assert net["auth"] in ("open", "wep", "wpa", "wpa2", "wpa2-ent", "wpa3", "unknown")
+
+
+def test_wifi_scan_endpoint_returns_fake_list(
+    host_url: str, api_request_context: APIRequestContext, on_real_device: bool
+):
+    """Host-only: verify the FakeWifi stub data round-trips through the
+    endpoint. Skipped on real hardware where the SSID list is real."""
+    if on_real_device:
+        pytest.skip("FakeWifi-specific SSIDs only present in the host build")
+    r = api_request_context.get(f"{host_url}/api/wifi/scan")
+    assert r.ok, r.text()
+    body = r.json()
+    ssids = {n["ssid"] for n in body["networks"]}
+    assert "FakeNet-2.4G" in ssids
+    assert "FakeNet-Guest" in ssids
 
 
 def test_wifi_reconnect_endpoint_returns_204(host_url: str, api_request_context: APIRequestContext):
@@ -33,27 +50,33 @@ def test_wifi_reconnect_endpoint_returns_204(host_url: str, api_request_context:
 # --- UI-level ----------------------------------------------------------------
 
 def test_wifi_scan_button_lists_results_and_can_pick(page, host_url: str):
-    """Click Scan → result rows appear → clicking one appends a new
-    Known-networks row pre-filled with that SSID."""
+    """Click Scan → at least one result row appears → clicking one
+    appends a new Known-networks row pre-filled with that SSID.
+
+    Works against both the host build (FakeWifi, 2 entries) and a real
+    device (whatever the neighbourhood looks like, ≥1 entry expected
+    in any lab environment)."""
     page.goto(host_url)
     page.click('button[data-tab="wifi"]')
     page.click("#wifi-scan")
 
-    # Result list populates with our two FakeWifi entries (ordered by RSSI).
     expect(page.locator("#wifi-scan-msg")).to_contain_text(re.compile(r"\d+ network"))
     rows = page.locator("#wifi-scan-results .list-row")
-    expect(rows).to_have_count(2)
-    expect(rows.first).to_contain_text("FakeNet-2.4G")
+    # ≥1 row on any reasonable network. Use to_have_count(N, timeout=…)
+    # implicitly via a wait_for. The .first locator below also waits.
+    first_row = rows.first
+    expect(first_row).to_be_visible()
 
-    # Click the strongest entry — a new Known-networks row should appear
-    # with SSID = FakeNet-2.4G and an empty password.
+    # Click the first (strongest, since we sort by RSSI in the SPA) entry —
+    # a new Known-networks row should appear with whatever SSID was on it.
+    first_ssid = first_row.locator(".field").first.locator("div").last.text_content()
     before = page.locator("#wifi-networks .list-row").count()
-    rows.first.click()
+    first_row.click()
     page.wait_for_function(
         f'document.querySelectorAll("#wifi-networks .list-row").length === {before + 1}'
     )
     added = page.locator("#wifi-networks .list-row").last
-    assert added.locator('[data-bind="ssid"]').input_value() == "FakeNet-2.4G"
+    assert added.locator('[data-bind="ssid"]').input_value() == first_ssid
     assert added.locator('[data-bind="password"]').input_value() == ""
 
 
