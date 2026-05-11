@@ -25,7 +25,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def console(jumpstarter_client, real_target_url):
+def console(jumpstarter_client, real_target_url, term):
     """Attach a pexpect console to the ESP32's UART. Depends on
     `real_target_url` so the session-level flash+boot has already
     completed before we try to grab the port — otherwise our adapter
@@ -33,11 +33,38 @@ def console(jumpstarter_client, real_target_url):
     from jumpstarter_driver_network.adapters import PexpectAdapter
 
     assert jumpstarter_client is not None, "JUMPSTARTER_HOST present but client is None"
-    # real_target_url is bound only to materialise the dependency; we
-    # discard the value here. The flash+detect already ran.
-    _ = real_target_url
+    _ = real_target_url  # only bound to force the device-setup dependency
+    term("cli: attaching pexpect adapter over client.serial")
     with PexpectAdapter(client=jumpstarter_client.serial) as c:
-        yield c
+        yield Narrator(c, term)
+    term("cli: console detached")
+
+
+class Narrator:
+    """Thin wrapper that logs every `sendline` / `expect` to the terminal
+    before delegating to the underlying pexpect spawn. Keeps the test
+    bodies short while still surfacing each UART exchange so a hung
+    `expect` is immediately obvious."""
+
+    def __init__(self, spawn, term):
+        self._s = spawn
+        self._term = term
+
+    def sendline(self, line: str) -> None:
+        self._term(f"cli: >>> {line}")
+        self._s.sendline(line)
+
+    def expect(self, pattern, timeout: float = 10) -> None:
+        # `pattern` is bytes — show a printable form.
+        shown = pattern.decode(errors="replace") if isinstance(pattern, (bytes, bytearray)) else str(pattern)
+        self._term(f"cli: waiting for /{shown}/ (timeout {timeout}s)")
+        self._s.expect(pattern, timeout=timeout)
+        match = getattr(self._s, "match", None)
+        if match is not None:
+            text = match.group(0)
+            if isinstance(text, bytes):
+                text = text.decode(errors="replace")
+            self._term(f"cli: <<< matched {text!r}")
 
 
 def test_serial_cli_help(console):
@@ -49,8 +76,8 @@ def test_serial_cli_help(console):
 
 def test_serial_cli_state_reports_wifi(console):
     console.sendline("state")
-    # Either Connected{...} (we got DHCP) or ApMode{...} (no network was
-    # reachable). Both are valid CLI states.
+    # Either Connected{…} (we got DHCP) or ApMode{…} (no known network).
+    # Both are valid CLI states.
     console.expect(rb">> wifi state: (Connected|ApMode|Connecting|Disconnected)", timeout=10)
 
 

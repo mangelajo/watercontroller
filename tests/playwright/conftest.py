@@ -22,6 +22,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import time
 from contextlib import closing
 from pathlib import Path
@@ -72,7 +73,7 @@ def _wait_until_listening(host: str, port: int, timeout_s: float = 30.0) -> None
 # ----------------------------------------------------------------------------
 
 @pytest.fixture(scope="session")
-def jumpstarter_client():
+def jumpstarter_client(term):
     """Yield a connected jumpstarter `client` when `JUMPSTARTER_HOST` is set,
     else `None`. The fixture is intentionally permissive: most host-only
     tests don't need a device, so we let them run by yielding None.
@@ -88,8 +89,11 @@ def jumpstarter_client():
     except ImportError as e:
         pytest.skip(f"jumpstarter not importable in this venv: {e}")
         return
+    term("jumpstarter: connecting via JUMPSTARTER_HOST…")
     with env() as client:
+        term(f"jumpstarter: connected — drivers: {sorted(getattr(client, 'children', {}).keys())}")
         yield client
+        term("jumpstarter: releasing client")
 
 
 def _flash_and_detect_ip(client, log) -> str:
@@ -136,19 +140,30 @@ def _flash_and_detect_ip(client, log) -> str:
 # Target URL resolution
 # ----------------------------------------------------------------------------
 
-def _terminal_writer(config):
-    """Return a callable that prints a line to pytest's terminal, even
-    while output capture is active. Used for visible progress during the
-    long (30+ s) flash + boot phase — otherwise the first test appears
-    to hang silently."""
-    tr = config.pluginmanager.get_plugin("terminalreporter")
-    if tr is None:
-        return lambda msg: None
-    return lambda msg: tr.write_line(msg)
+def _terminal_writer(_config=None):
+    """Return a callable that prints a progress line to the actual
+    terminal regardless of pytest's output capture state.
+
+    Why bypass `terminalreporter`: it routes through the captured
+    stdout (and depending on pytest's version the line ends up
+    buffered until the surrounding test finishes), so a 30 s flash +
+    boot phase looks like a frozen prompt. Writing directly to
+    `sys.__stderr__` is unbuffered and unaffected by capture, so the
+    user sees `device-setup: …` and `cli: …` lines live."""
+    def write(msg: str) -> None:
+        print(msg, file=sys.__stderr__, flush=True)
+    return write
 
 
 @pytest.fixture(scope="session")
-def real_target_url(jumpstarter_client, pytestconfig) -> str | None:
+def term(pytestconfig):
+    """Expose the terminal writer to tests/fixtures that want to surface
+    progress (e.g. each `>>` command/response in the serial CLI suite)."""
+    return _terminal_writer(pytestconfig)
+
+
+@pytest.fixture(scope="session")
+def real_target_url(jumpstarter_client, term) -> str | None:
     """Resolve where the test session should run:
 
     1. `WC_TEST_TARGET_URL` — point at an already-running device.
@@ -156,10 +171,12 @@ def real_target_url(jumpstarter_client, pytestconfig) -> str | None:
     3. neither — return None and let `host_url` spawn the host binary.
     """
     if env_url := os.environ.get("WC_TEST_TARGET_URL"):
+        term(f"target: using WC_TEST_TARGET_URL={env_url}")
         return env_url.rstrip("/")
     if jumpstarter_client is not None:
-        ip = _flash_and_detect_ip(jumpstarter_client, _terminal_writer(pytestconfig))
+        ip = _flash_and_detect_ip(jumpstarter_client, term)
         return f"http://{ip}"
+    term("target: no device — falling back to local host binary")
     return None
 
 
