@@ -184,6 +184,23 @@ ota-status: ## quick status snapshot. Usage: make ota-status IP=<addr>
 	@if [ -z "$(IP)" ]; then echo "Usage: make ota-status IP=<device-ip>"; exit 1; fi
 	@curl -s --max-time 5 http://$(IP)/api/status | python3 -m json.tool
 
+# Build + serial-flash + run the full playwright suite against the real
+# device, all inside a `jmp shell` lease. The lease auto-releases when the
+# inner shell exits.
+#
+# Override SELECTOR to target a specific exporter (default: any board
+# labelled target=esp32). Override IP to skip the flash and run tests
+# against an already-running device:
+#   make device-test
+#   make device-test SELECTOR='-n my-esp32'
+#   make device-test IP=192.168.1.182    # skip flash, reuse device
+SELECTOR ?= -l target=esp32
+
+.PHONY: device-test
+device-test: app-image $(PW_SENTINEL) ## build firmware, flash via jumpstarter, run playwright suite against the real device
+	@command -v jmp >/dev/null 2>&1 || { echo "jmp (jumpstarter CLI) not on PATH"; exit 1; }
+	@jmp shell $(SELECTOR) -- env IP=$(IP) BOOT_TIMEOUT_S=$(BOOT_TIMEOUT_S) ./scripts/device-test.sh
+
 # -- maintenance -----------------------------------------------------------
 
 .PHONY: clean
