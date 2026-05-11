@@ -1,3 +1,15 @@
 pytest>=8.0
 pytest-playwright>=0.5
 playwright>=1.45
+
+# Optional — needed for device tests (test_serial_cli.py) and the
+# session-scoped flash+boot fixture in conftest.py. When JUMPSTARTER_HOST
+# isn't set, the device tests are skipped and these packages are
+# imported lazily, so installs without jumpstarter access still work
+# for host-only tests.
+jumpstarter
+jumpstarter-testing
+jumpstarter-driver-network
+jumpstarter-driver-esp32
+jumpstarter-driver-pyserial
+pexpect

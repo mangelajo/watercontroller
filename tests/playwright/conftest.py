@@ -1,27 +1,25 @@
 """
 End-to-end UI tests for the watercontroller SPA.
 
-These tests drive the SPA against the **host build** (`crates/host`), which
-serves the same HTML and HTTP API as the firmware. Hardware behavior
-(real WiFi, MQTT, sensor reads) is out of scope here — those tests live on
-the device. What's covered here:
+Three modes, picked automatically by `real_target_url`:
 
-    * the SPA loads and the dashboard renders
-    * switch toggles round-trip through the JSON API
-    * the Settings tab loads, saves, and surfaces validation errors
-    * factory reset and OTA buttons exist and are wired up
-
-Conftest fixtures:
-
-* `host_binary` — path to the `host` cargo bin; built on first use of
-  the session (`cargo build --bin host`).
-* `host_url` — session-scoped fixture that spawns the host binary on a
-  free port and tears it down at the end of the test session.
+* `WC_TEST_TARGET_URL=http://x.y.z.w` — run all tests against an already
+  running device at that URL.
+* `JUMPSTARTER_HOST` set (i.e. we're inside an active `jmp shell -l
+  target=esp32`) — flash `target/firmware/app.bin`, reset the board,
+  and parse the DHCP-assigned IP out of the boot serial output once
+  per session. All driver interactions go through `jumpstarter.utils.
+  env()` and `PexpectAdapter`; nothing here shells out to `j` or kills
+  external `j serial pipe` consumers — if the serial port is already
+  held, the flash / pexpect calls will surface a clear error.
+* Neither set — spawn the local host binary (the original default,
+  used by `make ui-tests`).
 """
 
 from __future__ import annotations
 
 import os
+import re
 import socket
 import subprocess
 import time
@@ -33,6 +31,14 @@ from playwright.sync_api import APIRequestContext, Playwright
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+APP_BIN = REPO_ROOT / "target/firmware/app.bin"
+DEVICE_BOOT_TIMEOUT_S = float(os.environ.get("WC_DEVICE_BOOT_TIMEOUT_S", "45"))
+# Pattern esp_netif prints to UART once DHCP lands. The supervisor's
+# follow-up `wifi: connected to <ssid> (<ip>)` line is also a fine
+# anchor; we pick the lower-level one because it appears before the
+# Rust logger initialises and so works even if log-level filtering
+# changes later.
+_STA_IP_PATTERN = re.compile(rb"sta ip: (\d+\.\d+\.\d+\.\d+)")
 
 
 def _free_port() -> int:
@@ -54,11 +60,74 @@ def _wait_until_listening(host: str, port: int, timeout_s: float = 30.0) -> None
     raise RuntimeError(f"host binary did not start listening on {host}:{port} within {timeout_s}s")
 
 
+# ----------------------------------------------------------------------------
+# Jumpstarter client (session-scoped)
+# ----------------------------------------------------------------------------
+
 @pytest.fixture(scope="session")
-def real_target_url() -> str | None:
-    """If `WC_TEST_TARGET_URL` is set, run tests against that URL (a real
-    device, typically) instead of spawning the local host binary."""
-    return os.environ.get("WC_TEST_TARGET_URL")
+def jumpstarter_client():
+    """Yield a connected jumpstarter `client` when `JUMPSTARTER_HOST` is set,
+    else `None`. The fixture is intentionally permissive: most host-only
+    tests don't need a device, so we let them run by yielding None.
+
+    Inside `jmp shell -l target=esp32`, `JUMPSTARTER_HOST` points at the
+    lease's gRPC socket and `env()` connects without re-leasing.
+    """
+    if not os.environ.get("JUMPSTARTER_HOST"):
+        yield None
+        return
+    try:
+        from jumpstarter.common.utils import env
+    except ImportError as e:
+        pytest.skip(f"jumpstarter not importable in this venv: {e}")
+        return
+    with env() as client:
+        yield client
+
+
+def _flash_and_detect_ip(client) -> str:
+    """Flash `target/firmware/app.bin`, reset the board, and return the
+    DHCP-assigned IP read from the boot serial output. All driver calls
+    go through the jumpstarter client — no subprocesses, no port killing.
+    """
+    from jumpstarter_driver_network.adapters import PexpectAdapter
+
+    if not APP_BIN.exists():
+        raise RuntimeError(
+            f"{APP_BIN} not found — run `make app-image` "
+            "(or `make device-test` which does it for you)."
+        )
+
+    # Flash first; PexpectAdapter cannot be open while esptool drives EN /
+    # GPIO0 over the same UART. Then attach pexpect for the boot log.
+    client.esp32.flash(str(APP_BIN), target="0x20000")
+    with PexpectAdapter(client=client.esp32.serial) as console:
+        client.esp32.hard_reset()
+        console.expect(_STA_IP_PATTERN, timeout=DEVICE_BOOT_TIMEOUT_S)
+        ip = console.match.group(1)
+        if isinstance(ip, bytes):
+            ip = ip.decode()
+        return ip
+
+
+# ----------------------------------------------------------------------------
+# Target URL resolution
+# ----------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def real_target_url(jumpstarter_client) -> str | None:
+    """Resolve where the test session should run:
+
+    1. `WC_TEST_TARGET_URL` — point at an already-running device.
+    2. `JUMPSTARTER_HOST` — flash + boot + detect IP (done once).
+    3. neither — return None and let `host_url` spawn the host binary.
+    """
+    if env_url := os.environ.get("WC_TEST_TARGET_URL"):
+        return env_url.rstrip("/")
+    if jumpstarter_client is not None:
+        ip = _flash_and_detect_ip(jumpstarter_client)
+        return f"http://{ip}"
+    return None
 
 
 @pytest.fixture(scope="session")
@@ -78,11 +147,10 @@ def host_binary(real_target_url) -> Path | None:
 
 @pytest.fixture(scope="session")
 def host_url(host_binary: Path | None, real_target_url: str | None):
-    """Yield a base URL for the SPA. Either:
-      * the local host binary (default), or
-      * `WC_TEST_TARGET_URL` when set (e.g. http://192.168.1.151)."""
+    """Yield a base URL for the SPA. Either the local host binary or the
+    real device URL resolved above."""
     if real_target_url:
-        yield real_target_url.rstrip("/")
+        yield real_target_url
         return
     port = _free_port()
     bind = f"127.0.0.1:{port}"
