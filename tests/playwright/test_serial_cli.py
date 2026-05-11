@@ -1,7 +1,7 @@
 """Serial-CLI smoke test against a real ESP32.
 
 Pattern follows jumpstarter-dev's soc-pytest example: a long-lived
-`PexpectAdapter` over `client.esp32.serial`, driven by `sendline` /
+`PexpectAdapter` over `client.serial`, driven by `sendline` /
 `expect` rather than shelling out to `j serial pipe`. Auto-skipped
 when `JUMPSTARTER_HOST` is not set.
 
@@ -36,7 +36,7 @@ def console(jumpstarter_client, real_target_url):
     # real_target_url is bound only to materialise the dependency; we
     # discard the value here. The flash+detect already ran.
     _ = real_target_url
-    with PexpectAdapter(client=jumpstarter_client.esp32.serial) as c:
+    with PexpectAdapter(client=jumpstarter_client.serial) as c:
         yield c
 
 

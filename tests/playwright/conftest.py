@@ -92,10 +92,14 @@ def jumpstarter_client():
         yield client
 
 
-def _flash_and_detect_ip(client) -> str:
+def _flash_and_detect_ip(client, log) -> str:
     """Flash `target/firmware/app.bin`, reset the board, and return the
     DHCP-assigned IP read from the boot serial output. All driver calls
     go through the jumpstarter client — no subprocesses, no port killing.
+
+    `log` is a callable taking a single string; progress messages flow
+    through it so the user sees what's happening during the 30+ s of
+    setup (otherwise pytest's first test appears to hang).
     """
     from jumpstarter_driver_network.adapters import PexpectAdapter
 
@@ -108,22 +112,23 @@ def _flash_and_detect_ip(client) -> str:
     # Reset the OTA selector before flashing the app slot. Otherwise a
     # device that previously OTA'd into ota_1 keeps booting the stale
     # ota_1 image, even when we just dropped a fresh build into ota_0.
-    # The blank file is regenerated each session in target/firmware/ so
-    # the same write is idempotent and source-controlled out.
     blank = REPO_ROOT / "target/firmware/otadata_blank.bin"
     blank.parent.mkdir(parents=True, exist_ok=True)
     blank.write_bytes(b"\xff" * _OTADATA_SIZE)
+    log(f"device-setup: wiping otadata @ {_OTADATA_OFFSET}")
     client.esp32.flash(str(blank), target=_OTADATA_OFFSET)
 
-    # Flash app first; PexpectAdapter cannot be open while esptool drives
-    # EN / GPIO0 over the same UART. Then attach pexpect for the boot log.
+    log(f"device-setup: flashing {APP_BIN.name} @ 0x20000 ({APP_BIN.stat().st_size:,} B)")
     client.esp32.flash(str(APP_BIN), target="0x20000")
-    with PexpectAdapter(client=client.esp32.serial) as console:
+
+    log("device-setup: attaching console, resetting, waiting for sta ip…")
+    with PexpectAdapter(client=client.serial) as console:
         client.esp32.hard_reset()
         console.expect(_STA_IP_PATTERN, timeout=DEVICE_BOOT_TIMEOUT_S)
         ip = console.match.group(1)
         if isinstance(ip, bytes):
             ip = ip.decode()
+        log(f"device-setup: device IP {ip}")
         return ip
 
 
@@ -131,8 +136,19 @@ def _flash_and_detect_ip(client) -> str:
 # Target URL resolution
 # ----------------------------------------------------------------------------
 
+def _terminal_writer(config):
+    """Return a callable that prints a line to pytest's terminal, even
+    while output capture is active. Used for visible progress during the
+    long (30+ s) flash + boot phase — otherwise the first test appears
+    to hang silently."""
+    tr = config.pluginmanager.get_plugin("terminalreporter")
+    if tr is None:
+        return lambda msg: None
+    return lambda msg: tr.write_line(msg)
+
+
 @pytest.fixture(scope="session")
-def real_target_url(jumpstarter_client) -> str | None:
+def real_target_url(jumpstarter_client, pytestconfig) -> str | None:
     """Resolve where the test session should run:
 
     1. `WC_TEST_TARGET_URL` — point at an already-running device.
@@ -142,9 +158,19 @@ def real_target_url(jumpstarter_client) -> str | None:
     if env_url := os.environ.get("WC_TEST_TARGET_URL"):
         return env_url.rstrip("/")
     if jumpstarter_client is not None:
-        ip = _flash_and_detect_ip(jumpstarter_client)
+        ip = _flash_and_detect_ip(jumpstarter_client, _terminal_writer(pytestconfig))
         return f"http://{ip}"
     return None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _device_session_setup(real_target_url):
+    """Force the flash + IP-detect to run before any test, not lazily when
+    the first test happens to request `host_url`. With this autouse hook
+    the user sees `device-setup: …` progress lines immediately after
+    collection, instead of staring at a frozen `test_dashboard_loads` for
+    half a minute."""
+    return real_target_url
 
 
 @pytest.fixture(scope="session")
