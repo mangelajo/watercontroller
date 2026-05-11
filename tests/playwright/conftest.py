@@ -33,6 +33,13 @@ from playwright.sync_api import APIRequestContext, Playwright
 REPO_ROOT = Path(__file__).resolve().parents[2]
 APP_BIN = REPO_ROOT / "target/firmware/app.bin"
 DEVICE_BOOT_TIMEOUT_S = float(os.environ.get("WC_DEVICE_BOOT_TIMEOUT_S", "45"))
+# `partitions.csv`: otadata sits at 0xf000, size 0x2000. Writing it to
+# all-1s wipes the OTA selector so the bootloader falls back to ota_0
+# (which is where we serial-flash). Without this, a device that
+# previously OTA'd into ota_1 keeps booting the stale ota_1 image even
+# after we drop a fresh build into ota_0.
+_OTADATA_OFFSET = "0xf000"
+_OTADATA_SIZE = 0x2000
 # Pattern esp_netif prints to UART once DHCP lands. The supervisor's
 # follow-up `wifi: connected to <ssid> (<ip>)` line is also a fine
 # anchor; we pick the lower-level one because it appears before the
@@ -98,8 +105,18 @@ def _flash_and_detect_ip(client) -> str:
             "(or `make device-test` which does it for you)."
         )
 
-    # Flash first; PexpectAdapter cannot be open while esptool drives EN /
-    # GPIO0 over the same UART. Then attach pexpect for the boot log.
+    # Reset the OTA selector before flashing the app slot. Otherwise a
+    # device that previously OTA'd into ota_1 keeps booting the stale
+    # ota_1 image, even when we just dropped a fresh build into ota_0.
+    # The blank file is regenerated each session in target/firmware/ so
+    # the same write is idempotent and source-controlled out.
+    blank = REPO_ROOT / "target/firmware/otadata_blank.bin"
+    blank.parent.mkdir(parents=True, exist_ok=True)
+    blank.write_bytes(b"\xff" * _OTADATA_SIZE)
+    client.esp32.flash(str(blank), target=_OTADATA_OFFSET)
+
+    # Flash app first; PexpectAdapter cannot be open while esptool drives
+    # EN / GPIO0 over the same UART. Then attach pexpect for the boot log.
     client.esp32.flash(str(APP_BIN), target="0x20000")
     with PexpectAdapter(client=client.esp32.serial) as console:
         client.esp32.hard_reset()
