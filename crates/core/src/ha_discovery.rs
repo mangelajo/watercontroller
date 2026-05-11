@@ -87,6 +87,31 @@ pub struct Switch<'a> {
     pub name: &'a str,
 }
 
+pub struct BinarySensor<'a> {
+    pub key: &'a str,
+    pub name: &'a str,
+    pub device_class: Option<&'a str>,
+    pub icon: Option<&'a str>,
+}
+
+#[derive(Serialize, Debug)]
+struct BinarySensorPayload<'a> {
+    name: &'a str,
+    unique_id: String,
+    object_id: String,
+    state_topic: String,
+    payload_on: &'static str,
+    payload_off: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_class: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    icon: Option<&'a str>,
+    availability_topic: String,
+    payload_available: &'static str,
+    payload_not_available: &'static str,
+    device: DeviceBlock<'a>,
+}
+
 impl<'a> DeviceContext<'a> {
     fn device_block(&self) -> DeviceBlock<'a> {
         DeviceBlock {
@@ -141,6 +166,31 @@ impl<'a> DeviceContext<'a> {
                 self.discovery_prefix, unique_id
             ),
             payload: serde_json::to_vec(&payload).expect("HA sensor payload serializes"),
+        }
+    }
+
+    pub fn binary_sensor(&self, s: &BinarySensor<'a>) -> DiscoveryMsg {
+        let unique_id = self.unique_id(s.key);
+        let payload = BinarySensorPayload {
+            name: s.name,
+            unique_id: unique_id.clone(),
+            object_id: unique_id.clone(),
+            state_topic: self.sensor_state_topic(s.key),
+            payload_on: "ON",
+            payload_off: "OFF",
+            device_class: s.device_class,
+            icon: s.icon,
+            availability_topic: self.availability_topic(),
+            payload_available: "online",
+            payload_not_available: "offline",
+            device: self.device_block(),
+        };
+        DiscoveryMsg {
+            topic: format!(
+                "{}/binary_sensor/{}/config",
+                self.discovery_prefix, unique_id
+            ),
+            payload: serde_json::to_vec(&payload).expect("HA binary_sensor payload serializes"),
         }
     }
 
@@ -264,6 +314,16 @@ pub fn all_messages(ctx: &DeviceContext) -> Vec<DiscoveryMsg> {
     out.push(ctx.switch(&Switch { key: "sprinkler_1", name: "Riego exterior" }));
     out.push(ctx.switch(&Switch { key: "sprinkler_2", name: "Riego mobil" }));
     out.push(ctx.switch(&Switch { key: "water_control", name: "Water control" }));
+
+    // Flow-rate alarm — surfaces in HA as a binary_sensor with the
+    // `problem` device_class so it shows up in the device card alongside
+    // other safety / fault indicators.
+    out.push(ctx.binary_sensor(&BinarySensor {
+        key: "flow_alarm",
+        name: "Flow alarm",
+        device_class: Some("problem"),
+        icon: Some("mdi:water-alert"),
+    }));
     out
 }
 
@@ -340,7 +400,11 @@ mod tests {
         assert!(topics
             .iter()
             .any(|t| t.contains("sensor/doremorwater_uptime")));
-        // 5 measurement sensors + 4 diagnostic sensors + 3 switches = 12.
-        assert_eq!(msgs.len(), 12);
+        // 5 measurement sensors + 4 diagnostic sensors + 3 switches +
+        // 1 binary_sensor (flow_alarm) = 13.
+        assert_eq!(msgs.len(), 13);
+        assert!(topics
+            .iter()
+            .any(|t| t.contains("binary_sensor/doremorwater_flow_alarm")));
     }
 }

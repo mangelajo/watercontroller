@@ -111,6 +111,15 @@ impl MqttIntegration {
             WaterControlState::On | WaterControlState::Transitioning
         );
         sw("water_control", on);
+
+        // Flow-rate alarm — published as a `binary_sensor` with
+        // device_class=problem (HA convention). Retained, since the
+        // alarm latches; HA needs to re-read it on reconnect.
+        self.mqtt.publish(
+            &ctx.sensor_state_topic("flow_alarm"),
+            if snap.alarm.active { b"ON" } else { b"OFF" },
+            retained(),
+        );
     }
 
     /// On graceful shutdown / disconnect: best-effort offline marker.
@@ -241,9 +250,10 @@ mod tests {
         };
         integ.on_connect();
 
-        // 12 discovery messages (5 sensors + 4 diagnostics + 3 switches) + 1 availability online
+        // 13 discovery messages (5 sensors + 4 diagnostics + 3 switches +
+        // 1 binary_sensor for flow_alarm) + 1 availability online = 14.
         let pubs = mqtt.published.lock().unwrap();
-        assert_eq!(pubs.len(), 13);
+        assert_eq!(pubs.len(), 14);
         // Subscriptions for each command topic
         let subs = mqtt.subscriptions.lock().unwrap();
         assert_eq!(subs.len(), 3);
