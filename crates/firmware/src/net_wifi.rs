@@ -13,7 +13,7 @@ use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::wifi::{
     AccessPointConfiguration, AuthMethod, BlockingWifi, ClientConfiguration, Configuration,
-    EspWifi, ScanMethod, WifiEvent,
+    EspWifi, ScanMethod,
 };
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -51,10 +51,11 @@ impl WifiSupervisor {
         });
 
         let s = supervisor.clone();
-        // 12 KiB ran with only 176 B headroom on /api/diag — too close to
-        // overflow for an event-driven supervisor whose callbacks can chain
-        // surprisingly deep. 16 KiB gives ~4 KiB margin.
-        crate::task_util::spawn_named(c"wifi-sup", 16 * 1024, move || {
+        // 16 KiB blew up with a stack-overflow once the periodic health
+        // probe started calling get_ap_info() + logging the result on this
+        // task. 24 KiB restores comfortable headroom for the deepest call
+        // chain (lwIP / esp_wifi internals + log format buffer).
+        crate::task_util::spawn_named(c"wifi-sup", 32 * 1024, move || {
             if let Err(e) = run(s, modem, sys_loop, nvs) {
                 log::error!("wifi supervisor terminated: {e:?}");
             }
@@ -87,27 +88,7 @@ fn run(
     sys_loop: EspSystemEventLoop,
     nvs: EspDefaultNvsPartition,
 ) -> Result<()> {
-    let mut wifi = BlockingWifi::wrap(
-        EspWifi::new(modem, sys_loop.clone(), Some(nvs))?,
-        sys_loop.clone(),
-    )?;
-
-    // Surface raw WIFI events to the log so silent drops become visible.
-    // The returned subscription must stay alive for the lifetime of run().
-    let _wifi_event_sub = sys_loop.subscribe::<WifiEvent, _>(|event| match event {
-        WifiEvent::StaDisconnected(d) => {
-            log::warn!(
-                "wifi: STA disconnected ssid={} bssid={:02x?} reason={} rssi={}",
-                String::from_utf8_lossy(d.ssid()),
-                d.bssid(),
-                d.reason(),
-                d.rssi()
-            );
-        }
-        WifiEvent::StaStopped => log::warn!("wifi: STA stopped"),
-        WifiEvent::StaBeaconTimeout => log::warn!("wifi: STA beacon timeout"),
-        _ => {}
-    })?;
+    let mut wifi = BlockingWifi::wrap(EspWifi::new(modem, sys_loop.clone(), Some(nvs))?, sys_loop)?;
 
     loop {
         let networks = sup.networks.lock().unwrap().clone();
