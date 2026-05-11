@@ -40,6 +40,12 @@ struct AppInner {
     sprinkler2: Mutex<TimedSwitch>,
     nvs: Option<Arc<dyn NvsStore>>,
     last_persisted_valve: Mutex<Option<bool>>,
+    /// Timestamp (clock.monotonic_ms) of the most recent flow-alarm
+    /// evaluation. Used to compute the elapsed-time delta on each tick
+    /// — tick rate isn't fixed (firmware ticks faster during sequencer
+    /// transitions, slower at idle), so we count real time rather than
+    /// ticks.
+    flow_alarm_last_check_ms: Mutex<Option<u64>>,
 }
 
 impl App {
@@ -87,6 +93,7 @@ impl App {
                 sprinkler2: Mutex::new(s2),
                 nvs,
                 last_persisted_valve: Mutex::new(restored_state),
+                flow_alarm_last_check_ms: Mutex::new(None),
             }),
         }
     }
@@ -246,6 +253,10 @@ impl App {
             s.switches.water_control = new_wc;
         });
 
+        // Flow-rate alarm: evaluate after sprinkler/valve state was
+        // mirrored above so `any_sprinkler_on` reflects this tick.
+        self.evaluate_flow_alarm(now);
+
         // Persist user-visible valve state to NVS on transition. We only
         // write when the value changes — avoids hot-looping NVS writes
         // during the no-op tick path.
@@ -266,6 +277,90 @@ impl App {
             sprinkler_1: s1_on,
             sprinkler_2: s2_on,
             valve: valve_outputs,
+        }
+    }
+}
+
+impl App {
+    /// Evaluate the flow-rate alarm rule. Called from `tick()` after the
+    /// sprinkler/valve snapshot is updated.
+    ///
+    /// Rule (per the user's spec): if `sensors.flow_lph` is ≥
+    /// `config.flow_alarm.threshold_lph` for a sustained
+    /// `duration_secs`, while no sprinkler is currently on, latch
+    /// `alarm.active = true` and force water_control off. Sprinkler
+    /// activity resets the elapsed counter — high flow during a known
+    /// open zone isn't anomalous.
+    ///
+    /// Latched: once active, only `clear_flow_alarm()` (POST
+    /// /api/alarm/clear or the serial `alarm clear` command) un-sets
+    /// it. While latched and the valve has somehow re-opened, the
+    /// rule keeps issuing close on every tick — best-effort retry.
+    fn evaluate_flow_alarm(&self, now_ms: u64) {
+        let cfg = self.config();
+        // Update last-check timestamp even when disabled so a later
+        // enable doesn't see a giant accumulated delta.
+        let delta_s = {
+            let mut last = self.inner.flow_alarm_last_check_ms.lock().unwrap();
+            let d = match *last {
+                Some(t) => ((now_ms.saturating_sub(t)) / 1000) as u32,
+                None => 0,
+            };
+            *last = Some(now_ms);
+            d
+        };
+        if !cfg.flow_alarm.enabled {
+            // Reset state when disabled so re-enable starts clean.
+            self.update_state(|s| {
+                s.alarm.active = false;
+                s.alarm.elapsed_secs = 0;
+            });
+            return;
+        }
+
+        let snap = self.snapshot();
+        let any_sprinkler_on = snap.switches.sprinkler_1 || snap.switches.sprinkler_2;
+        let flow = snap.sensors.flow_lph.unwrap_or(0.0);
+        let above = flow >= cfg.flow_alarm.threshold_lph;
+        let threshold = cfg.flow_alarm.threshold_lph;
+        let duration = cfg.flow_alarm.duration_secs;
+        let was_active = snap.alarm.active;
+
+        let mut just_fired = false;
+        self.update_state(|s| {
+            s.alarm.elapsed_secs = if any_sprinkler_on || !above {
+                0
+            } else {
+                s.alarm.elapsed_secs.saturating_add(delta_s)
+            };
+            if !was_active && s.alarm.elapsed_secs >= duration {
+                s.alarm.active = true;
+                just_fired = true;
+            }
+        });
+
+        if just_fired {
+            log::error!(
+                "flow alarm FIRED: flow {flow:.1} L/h ≥ {threshold:.1} L/h sustained ≥ {duration}s — closing water_control"
+            );
+            let _ = self.switch_command(SwitchCommand::WaterControl { on: false });
+        } else if was_active
+            && matches!(snap.switches.water_control, WaterControlState::On)
+        {
+            // Best-effort retry while alarm is latched.
+            let _ = self.switch_command(SwitchCommand::WaterControl { on: false });
+        }
+    }
+
+    /// User-initiated clear. Resets latched alarm + elapsed counter.
+    pub fn clear_flow_alarm(&self) {
+        let was_active = self.inner.state.snapshot().alarm.active;
+        self.update_state(|s| {
+            s.alarm.active = false;
+            s.alarm.elapsed_secs = 0;
+        });
+        if was_active {
+            log::info!("flow alarm cleared");
         }
     }
 }
@@ -342,5 +437,138 @@ mod tests {
         app.tick();
         let r2 = app.switch_command(SwitchCommand::WaterControl { on: false });
         assert!(matches!(r2, CommandOutcome::Busy { .. }));
+    }
+
+    // ---------------- flow alarm ----------------
+
+    /// Helper: configure flow alarm with a chosen threshold/duration and
+    /// publish a fake flow_lph reading via `update_state`.
+    fn arm_alarm(app: &App, threshold: f32, duration_secs: u32) {
+        let mut cfg = (*app.config()).clone();
+        cfg.flow_alarm = crate::config::FlowAlarmConfig {
+            enabled: true,
+            threshold_lph: threshold,
+            duration_secs,
+        };
+        app.replace_config(cfg);
+    }
+
+    fn set_flow(app: &App, lph: f32) {
+        app.update_state(|s| s.sensors.flow_lph = Some(lph));
+    }
+
+    #[test]
+    fn flow_alarm_fires_after_sustained_high_flow() {
+        let clock = Arc::new(TestClock::new());
+        let app = App::new(clock.clone(), Config::default());
+        arm_alarm(&app, 50.0, 10);
+        set_flow(&app, 200.0); // well above threshold
+
+        // First tick establishes the baseline (delta = 0).
+        app.tick();
+        assert!(!app.snapshot().alarm.active);
+
+        // 5 s — not yet over duration.
+        clock.advance(5_000);
+        app.tick();
+        assert!(!app.snapshot().alarm.active);
+        assert_eq!(app.snapshot().alarm.elapsed_secs, 5);
+
+        // Another 6 s — total 11 s ≥ 10 s threshold → fire.
+        clock.advance(6_000);
+        app.tick();
+        let s = app.snapshot();
+        assert!(s.alarm.active, "alarm should have fired by now");
+        assert!(s.alarm.elapsed_secs >= 10);
+    }
+
+    #[test]
+    fn flow_alarm_ignored_while_sprinkler_on() {
+        let clock = Arc::new(TestClock::new());
+        let app = App::new(clock.clone(), Config::default());
+        arm_alarm(&app, 50.0, 5);
+        set_flow(&app, 200.0);
+
+        // Turn a sprinkler on — its activity should mask any high flow.
+        app.switch_command(SwitchCommand::Sprinkler1 { on: true });
+        app.tick(); // baseline
+
+        for _ in 0..10 {
+            clock.advance(1_000);
+            app.tick();
+            // Re-assert flow each tick because the snapshot mirror
+            // would otherwise reset it via state.sensors not being
+            // re-published. (We bypass the real sensor read path.)
+            set_flow(&app, 200.0);
+        }
+
+        let s = app.snapshot();
+        assert!(!s.alarm.active);
+        assert_eq!(s.alarm.elapsed_secs, 0);
+    }
+
+    #[test]
+    fn flow_alarm_resets_elapsed_when_flow_drops() {
+        let clock = Arc::new(TestClock::new());
+        let app = App::new(clock.clone(), Config::default());
+        arm_alarm(&app, 50.0, 30);
+        set_flow(&app, 100.0);
+
+        app.tick();
+        clock.advance(10_000);
+        app.tick();
+        assert_eq!(app.snapshot().alarm.elapsed_secs, 10);
+
+        // Drop below threshold — elapsed must reset.
+        set_flow(&app, 5.0);
+        clock.advance(1_000);
+        app.tick();
+        assert_eq!(app.snapshot().alarm.elapsed_secs, 0);
+    }
+
+    #[test]
+    fn flow_alarm_latches_until_cleared() {
+        let clock = Arc::new(TestClock::new());
+        let app = App::new(clock.clone(), Config::default());
+        arm_alarm(&app, 50.0, 5);
+        set_flow(&app, 100.0);
+        app.tick();
+        clock.advance(6_000);
+        app.tick();
+        assert!(app.snapshot().alarm.active);
+
+        // Flow drops to zero — alarm stays latched.
+        set_flow(&app, 0.0);
+        for _ in 0..10 {
+            clock.advance(1_000);
+            app.tick();
+        }
+        assert!(app.snapshot().alarm.active);
+
+        // Explicit clear resets both flags.
+        app.clear_flow_alarm();
+        let s = app.snapshot();
+        assert!(!s.alarm.active);
+        assert_eq!(s.alarm.elapsed_secs, 0);
+    }
+
+    #[test]
+    fn flow_alarm_disabled_resets_state() {
+        let clock = Arc::new(TestClock::new());
+        let app = App::new(clock.clone(), Config::default());
+        arm_alarm(&app, 10.0, 1);
+        set_flow(&app, 200.0);
+        app.tick();
+        clock.advance(2_000);
+        app.tick();
+        assert!(app.snapshot().alarm.active);
+
+        // Disable — state must clear without needing a manual clear.
+        let mut cfg = (*app.config()).clone();
+        cfg.flow_alarm.enabled = false;
+        app.replace_config(cfg);
+        app.tick();
+        assert!(!app.snapshot().alarm.active);
+        assert_eq!(app.snapshot().alarm.elapsed_secs, 0);
     }
 }

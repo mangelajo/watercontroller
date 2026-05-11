@@ -186,6 +186,27 @@ impl Default for SwitchesConfig {
     }
 }
 
+/// Flow-rate alarm. Fires when `sensors.flow_lph` stays at or above
+/// `threshold_lph` for at least `duration_secs`, but ignores periods
+/// while any sprinkler is on (sprinklers cause expected high flow).
+/// Fire → latched active state + forced water_control off. Cleared
+/// via /api/alarm/clear or the `alarm clear` serial command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FlowAlarmConfig {
+    pub enabled: bool,
+    pub threshold_lph: f32,
+    pub duration_secs: u32,
+}
+
+impl Default for FlowAlarmConfig {
+    fn default() -> Self {
+        // Disabled by default — the user opts in via the UI / API and
+        // picks numbers appropriate to their plumbing. 100 L/h for 60 s
+        // is a reasonable starting point for a household feed.
+        Self { enabled: false, threshold_lph: 100.0, duration_secs: 60 }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default)]
@@ -198,6 +219,8 @@ pub struct Config {
     pub switches: SwitchesConfig,
     #[serde(default)]
     pub sensors: SensorsConfig,
+    #[serde(default)]
+    pub flow_alarm: FlowAlarmConfig,
     #[serde(default = "default_timezone")]
     pub timezone: String,
     /// Bare SNTP server hostnames.
@@ -235,6 +258,7 @@ impl Default for Config {
             https: HttpsConfig::default(),
             switches: SwitchesConfig::default(),
             sensors: SensorsConfig::default(),
+            flow_alarm: FlowAlarmConfig::default(),
             timezone: default_timezone(),
             sntp_servers: default_sntp_servers(),
             schedule: default_schedule(),

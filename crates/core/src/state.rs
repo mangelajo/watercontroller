@@ -60,12 +60,24 @@ pub struct Diagnostics {
     pub reset_reason: Option<String>,
 }
 
+/// Latched flow-rate alarm. `elapsed_secs` counts the current sustained-
+/// above-threshold window (resets when flow drops or any sprinkler is
+/// on); `active` becomes `true` once elapsed crosses
+/// `config.flow_alarm.duration_secs` and stays true until the user
+/// clears it (POST /api/alarm/clear or `alarm clear` over serial).
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+pub struct FlowAlarm {
+    pub active: bool,
+    pub elapsed_secs: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct DeviceSnapshot {
     pub sensors: Sensors,
     pub switches: Switches,
     pub network: Network,
     pub diagnostics: Diagnostics,
+    pub alarm: FlowAlarm,
     pub uptime_ms: u64,
     pub firmware_version: String,
 }
