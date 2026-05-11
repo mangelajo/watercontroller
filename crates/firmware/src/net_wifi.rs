@@ -15,18 +15,28 @@ use esp_idf_svc::wifi::{
     AccessPointConfiguration, AuthMethod, BlockingWifi, ClientConfiguration, Configuration,
     EspWifi, ScanMethod,
 };
+use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use watercontroller_core::api::WifiScanResult;
 use watercontroller_core::traits::{Wifi, WifiCreds, WifiState};
 
 const STA_CONNECT_TIMEOUT_S: u8 = 12;
 const SCAN_LOOP_INTERVAL: Duration = Duration::from_secs(30);
 
+type ScanReply = Result<Vec<WifiScanResult>, String>;
+
 pub struct WifiSupervisor {
     state: Arc<Mutex<WifiState>>,
     networks: Arc<Mutex<Vec<WifiCreds>>>,
     rescan_signal: Arc<Mutex<bool>>,
+    /// One-shot scan request slot. `scan()` installs a sender here and
+    /// signals the supervisor; the supervisor performs the scan on its
+    /// own task (it owns the EspWifi) and sends the result back. Bounded
+    /// capacity 1 — if the slot is already taken the new request is
+    /// rejected with "scan already in flight" rather than queued.
+    scan_request: Arc<Mutex<Option<SyncSender<ScanReply>>>>,
     ap_ssid: String,
     ap_password: String,
 }
@@ -46,16 +56,19 @@ impl WifiSupervisor {
             state: Arc::new(Mutex::new(WifiState::Disconnected)),
             networks: Arc::new(Mutex::new(initial_networks)),
             rescan_signal: Arc::new(Mutex::new(true)),
+            scan_request: Arc::new(Mutex::new(None)),
             ap_ssid,
             ap_password,
         });
 
         let s = supervisor.clone();
-        // 16 KiB blew up with a stack-overflow once the periodic health
-        // probe started calling get_ap_info() + logging the result on this
-        // task. 24 KiB restores comfortable headroom for the deepest call
-        // chain (lwIP / esp_wifi internals + log format buffer).
-        crate::task_util::spawn_named(c"wifi-sup", 32 * 1024, move || {
+        // 12 KiB ran with only 176 B headroom on /api/diag — too close to
+        // overflow for an event-driven supervisor whose callbacks can chain
+        // surprisingly deep. 16 KiB gives ~4 KiB margin. The periodic
+        // get_ap_info probe is factored into a `#[inline(never)]` helper
+        // (`probe_link`) so its heavy locals don't bloat `run()`'s
+        // permanent stack frame.
+        crate::task_util::spawn_named(c"wifi-sup", 16 * 1024, move || {
             if let Err(e) = run(s, modem, sys_loop, nvs) {
                 log::error!("wifi supervisor terminated: {e:?}");
             }
@@ -74,11 +87,48 @@ impl Wifi for WifiSupervisor {
         self.state.lock().unwrap().clone()
     }
     fn connect(&self, networks: &[WifiCreds]) {
-        *self.networks.lock().unwrap() = networks.to_vec();
-        *self.rescan_signal.lock().unwrap() = true;
+        let changed = {
+            let mut cur = self.networks.lock().unwrap();
+            let same = cur.len() == networks.len()
+                && cur.iter().zip(networks.iter()).all(|(a, b)| a == b);
+            if !same {
+                *cur = networks.to_vec();
+            }
+            !same
+        };
+        if changed {
+            log::info!("wifi: network list updated ({} entries)", networks.len());
+            *self.rescan_signal.lock().unwrap() = true;
+        }
     }
     fn reconnect(&self) {
         *self.rescan_signal.lock().unwrap() = true;
+    }
+    fn scan(&self) -> ScanReply {
+        // Bounded(1) so we don't block on send; the supervisor reads from
+        // the slot, not the channel, so receive-only semantics are fine.
+        let (tx, rx) = sync_channel::<ScanReply>(1);
+        {
+            let mut slot = self.scan_request.lock().unwrap();
+            if slot.is_some() {
+                return Err("scan already in flight".into());
+            }
+            *slot = Some(tx);
+        }
+        // NB: do NOT set rescan_signal here. That flag means "reconnect to
+        // the network list now" — coupling it with scan() would tear down
+        // the STA association on every scan request. The supervisor polls
+        // the scan_request slot on each loop tick (every 2–5 s), so the
+        // worst-case latency is one sleep window. Reasonable for an
+        // interactive scan; cheap compared to dropping the link.
+        match rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(r) => r,
+            Err(_) => {
+                // Clear the slot so a follow-up scan can be issued.
+                *self.scan_request.lock().unwrap() = None;
+                Err("scan timed out".into())
+            }
+        }
     }
 }
 
@@ -120,32 +170,14 @@ fn run(
             let mut probe_fails: u32 = 0;
             let mut ticks: u32 = 0;
             while wifi.is_connected().unwrap_or(false) {
+                serve_scan_request(&sup, &mut wifi);
                 if *sup.rescan_signal.lock().unwrap() {
                     break;
                 }
                 thread::sleep(Duration::from_secs(5));
                 ticks += 1;
-                if ticks % 6 == 0 {
-                    match wifi.wifi_mut().driver_mut().get_ap_info() {
-                        Ok(info) => {
-                            probe_fails = 0;
-                            log::info!(
-                                "wifi: link ok rssi={} dBm ssid={}",
-                                info.signal_strength,
-                                info.ssid
-                            );
-                        }
-                        Err(e) => {
-                            probe_fails += 1;
-                            log::warn!(
-                                "wifi: ap_info probe failed ({e:?}) consecutive={probe_fails}"
-                            );
-                            if probe_fails >= 3 {
-                                log::warn!("wifi: 3 probe failures — forcing reconnect");
-                                break;
-                            }
-                        }
-                    }
+                if ticks % 6 == 0 && !probe_link(&mut wifi, &mut probe_fails) {
+                    break;
                 }
             }
             log::warn!("wifi: link lost, rescanning");
@@ -165,6 +197,7 @@ fn run(
             // Rescan loop: every SCAN_LOOP_INTERVAL or on explicit rescan signal.
             let mut waited = Duration::ZERO;
             while !*sup.rescan_signal.lock().unwrap() && waited < SCAN_LOOP_INTERVAL {
+                serve_scan_request(&sup, &mut wifi);
                 thread::sleep(Duration::from_secs(2));
                 waited += Duration::from_secs(2);
             }
@@ -180,11 +213,97 @@ fn run(
             }
             // Wait for a `connect()` call from the API to add networks.
             while !*sup.rescan_signal.lock().unwrap() {
+                serve_scan_request(&sup, &mut wifi);
                 thread::sleep(Duration::from_secs(2));
             }
             let _ = wifi.stop();
         }
     }
+}
+
+/// One health-probe tick. Returns `false` when the caller should leave the
+/// connected loop and force a reconnect (three consecutive failures).
+///
+/// Kept in its own function (`#[inline(never)]`) so the heavy locals it
+/// needs — `wifi_ap_record_t` (~80 B), `AccessPointInfo`, the log-format
+/// argument buffer (~700 B per `{}`) — only live on the stack while the
+/// probe is running, not as part of `run()`'s permanent stack frame.
+/// Inlining would prologue-allocate all of this on every tick of the
+/// connected loop, which previously pushed wifi-sup past 32 KiB.
+#[inline(never)]
+fn probe_link(
+    wifi: &mut BlockingWifi<EspWifi<'static>>,
+    probe_fails: &mut u32,
+) -> bool {
+    match wifi.wifi_mut().driver_mut().get_ap_info() {
+        Ok(info) => {
+            *probe_fails = 0;
+            let rssi: i32 = info.signal_strength as i32;
+            log::info!("wifi: rssi {rssi}");
+            true
+        }
+        Err(_) => {
+            *probe_fails += 1;
+            let n = *probe_fails;
+            log::warn!("wifi: probe failed (consecutive {n})");
+            if n >= 3 {
+                log::warn!("wifi: forcing reconnect after probe failures");
+                false
+            } else {
+                true
+            }
+        }
+    }
+}
+
+/// Service a pending scan request, if any. Kept `#[inline(never)]` because
+/// `BlockingWifi::scan()` returns a `Vec<AccessPointInfo>` containing
+/// heapless strings + per-AP metadata, plus we map each into our
+/// `WifiScanResult` — sizable transient locals we don't want bloating the
+/// supervisor's permanent frame.
+#[inline(never)]
+fn serve_scan_request(sup: &Arc<WifiSupervisor>, wifi: &mut BlockingWifi<EspWifi<'static>>) {
+    let tx = match sup.scan_request.lock().unwrap().take() {
+        Some(t) => t,
+        None => return,
+    };
+    log::info!("wifi: scan requested");
+    let result = match wifi.scan() {
+        Ok(aps) => {
+            let mut out = Vec::with_capacity(aps.len());
+            for ap in aps {
+                out.push(WifiScanResult {
+                    ssid: ap.ssid.to_string(),
+                    rssi_dbm: ap.signal_strength,
+                    auth: auth_label(ap.auth_method),
+                    channel: ap.channel,
+                });
+            }
+            log::info!("wifi: scan returned {} ap(s)", out.len());
+            Ok(out)
+        }
+        Err(e) => {
+            log::warn!("wifi: scan failed: {e}");
+            Err(format!("scan failed: {e}"))
+        }
+    };
+    let _ = tx.send(result);
+}
+
+fn auth_label(auth: Option<AuthMethod>) -> String {
+    match auth {
+        None => "unknown",
+        Some(AuthMethod::None) => "open",
+        Some(AuthMethod::WEP) => "wep",
+        Some(AuthMethod::WPA) => "wpa",
+        Some(AuthMethod::WPA2Personal) => "wpa2",
+        Some(AuthMethod::WPAWPA2Personal) => "wpa2",
+        Some(AuthMethod::WPA2Enterprise) => "wpa2-ent",
+        Some(AuthMethod::WPA3Personal) => "wpa3",
+        Some(AuthMethod::WPA2WPA3Personal) => "wpa3",
+        Some(_) => "unknown",
+    }
+    .into()
 }
 
 fn try_connect_sta(wifi: &mut BlockingWifi<EspWifi<'static>>, creds: &WifiCreds) -> Result<()> {

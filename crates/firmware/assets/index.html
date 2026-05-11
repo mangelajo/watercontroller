@@ -362,8 +362,19 @@
         <button class="add-row" id="wifi-add">+ Add network</button>
         <div class="row">
           <button class="btn primary" id="wifi-save">Save WiFi</button>
+          <button class="btn" id="wifi-reconnect">Reconnect now</button>
           <span class="status-msg" id="wifi-msg"></span>
         </div>
+      </section>
+
+      <section class="card full">
+        <h2>Scan for networks</h2>
+        <p class="muted">Lists nearby SSIDs. Click an entry to drop it into a new "Known network" row.</p>
+        <div class="row">
+          <button class="btn" id="wifi-scan">Scan</button>
+          <span class="status-msg" id="wifi-scan-msg"></span>
+        </div>
+        <div id="wifi-scan-results" style="margin-top: 8px;"></div>
       </section>
     </section>
 
@@ -1047,6 +1058,49 @@
     })).filter(n => n.ssid.length > 0);
     saveConfig("wifi");
   });
+  $("#wifi-reconnect").addEventListener("click", async () => {
+    msgInfo("#wifi-msg", "reconnecting…");
+    try {
+      const r = await fetch("/api/wifi/reconnect", { method: "POST" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      msgOk("#wifi-msg", "reconnect signaled");
+    } catch (e) {
+      msgErr("#wifi-msg", "reconnect failed: " + e.message);
+    }
+  });
+  $("#wifi-scan").addEventListener("click", async () => {
+    const out = $("#wifi-scan-results");
+    msgInfo("#wifi-scan-msg", "scanning…");
+    out.innerHTML = "";
+    try {
+      const r = await fetch("/api/wifi/scan");
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      const nets = (data.networks || []).slice().sort((a, b) => b.rssi_dbm - a.rssi_dbm);
+      msgOk("#wifi-scan-msg", `${nets.length} network(s)`);
+      for (const n of nets) {
+        const row = document.createElement("div");
+        row.className = "list-row";
+        row.style.cursor = "pointer";
+        row.innerHTML = `
+          <div class="field"><label>SSID</label><div>${escapeHtml(n.ssid || "(hidden)")}</div></div>
+          <div class="field"><label>RSSI</label><div>${n.rssi_dbm} dBm</div></div>
+          <div class="field"><label>Auth</label><div>${escapeHtml(n.auth)} · ch ${n.channel}</div></div>`;
+        row.title = "Click to add this SSID to Known networks";
+        row.addEventListener("click", () => {
+          currentConfig.wifi.networks.push({ ssid: n.ssid, password: "" });
+          renderWifi();
+          msgInfo("#wifi-msg", `added ${n.ssid} — enter password and Save WiFi`);
+        });
+        out.appendChild(row);
+      }
+    } catch (e) {
+      msgErr("#wifi-scan-msg", "scan failed: " + e.message);
+    }
+  });
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  }
 
   // Sprinklers (auto-off). Form is in minutes; persisted field is in seconds.
   // We round to whole seconds on save, and to whole minutes on display — so a

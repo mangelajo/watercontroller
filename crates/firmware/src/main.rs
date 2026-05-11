@@ -13,6 +13,7 @@ mod mqtt_client;
 mod net_ota;
 mod net_wg;
 mod net_wifi;
+mod serial_cli;
 #[cfg(feature = "qemu")]
 mod qemu_eth;
 mod task_util;
@@ -40,6 +41,23 @@ use watercontroller_core::app::App;
 use watercontroller_core::config::Config;
 use watercontroller_core::mqtt_dispatch::MqttIntegration;
 use watercontroller_core::traits::{Clock, Mqtt, NvsStore, Wifi};
+
+/// Stub `Wifi` used under the `qemu` feature so the same http_server code
+/// can require a Wifi handle on both targets. open_eth provides the actual
+/// connectivity; nothing about the radio is reachable from qemu.
+#[cfg(feature = "qemu")]
+struct NoopWifi;
+#[cfg(feature = "qemu")]
+impl watercontroller_core::traits::Wifi for NoopWifi {
+    fn state(&self) -> watercontroller_core::traits::WifiState {
+        watercontroller_core::traits::WifiState::Disconnected
+    }
+    fn connect(&self, _: &[watercontroller_core::traits::WifiCreds]) {}
+    fn reconnect(&self) {}
+    fn scan(&self) -> Result<Vec<watercontroller_core::api::WifiScanResult>, String> {
+        Err("scan unavailable under qemu".into())
+    }
+}
 
 fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -175,8 +193,8 @@ fn main() -> Result<()> {
     // this — qemu doesn't simulate the WiFi peripheral well enough to
     // initialize `EspWifi`. open_eth provides networking instead.
     #[cfg(not(feature = "qemu"))]
-    {
-        let wifi = WifiSupervisor::spawn(
+    let wifi: Arc<dyn watercontroller_core::traits::Wifi> = {
+        let sup = WifiSupervisor::spawn(
             peripherals.modem,
             sys_loop.clone(),
             nvs_part.clone(),
@@ -184,13 +202,17 @@ fn main() -> Result<()> {
             config.wifi.ap_password.clone(),
             config.wifi.networks.clone(),
         )?;
-        spawn_wifi_state_mirror(app.clone(), wifi.clone(), captive_redirect.clone());
+        spawn_wifi_state_mirror(app.clone(), sup.clone(), captive_redirect.clone());
 
         // MQTT: connect once WiFi is up. Spawned task waits for STA up and (re)connects
         // to the broker on link recovery, then publishes HA Discovery + retained state.
         let mqtt: Arc<EspMqtt> = Arc::new(EspMqtt::new());
-        spawn_mqtt_supervisor(app.clone(), mqtt.clone(), wifi.clone());
-    }
+        spawn_mqtt_supervisor(app.clone(), mqtt.clone(), sup.clone());
+
+        sup
+    };
+    #[cfg(feature = "qemu")]
+    let wifi: Arc<dyn watercontroller_core::traits::Wifi> = Arc::new(NoopWifi);
     #[cfg(feature = "qemu")]
     let _eth = {
         let _ = (&peripherals.modem, &nvs_part);
@@ -220,9 +242,11 @@ fn main() -> Result<()> {
     }
 
     log_telnet::spawn(23);
+    serial_cli::spawn(app.clone(), nvs_store.clone(), wifi.clone());
     let _httpd = http_server::spawn(
         app.clone(),
         nvs_store.clone(),
+        wifi.clone(),
         80,
         &config.https.cert_pem,
         &config.https.key_pem,
@@ -252,8 +276,8 @@ fn main() -> Result<()> {
             .stack_size(8 * 1024)
             .spawn(move || loop {
                 let outputs = app.tick();
-                valve_open.set(outputs.valve.open_coil);
-                valve_close.set(outputs.valve.close_coil);
+                valve_open.set(outputs.valve.open_motor);
+                valve_close.set(outputs.valve.close_motor);
                 drain.set(outputs.valve.drain);
                 sprinkler1_pin.set(outputs.sprinkler_1);
                 sprinkler2_pin.set(outputs.sprinkler_2);
@@ -494,21 +518,18 @@ fn spawn_schedule_task(app: App, clock: Arc<dyn Clock>) {
                     );
                     use watercontroller_core::api::SwitchCommand;
                     use watercontroller_core::schedule::Action;
-                    let cmd = match &rule.action {
-                        Action::Switch { id } => match id.as_str() {
-                            "sprinkler_1" => Some(SwitchCommand::Sprinkler1 { on: true }),
-                            "sprinkler_2" => Some(SwitchCommand::Sprinkler2 { on: true }),
-                            other => {
-                                log::warn!("schedule: rule '{}' references unknown switch '{}', skipping", rule.id, other);
-                                None
+                    match &rule.action {
+                        Action::Switch { id } => {
+                            if !app.fire_schedule_sprinkler(id, rule.duration_secs) {
+                                log::warn!(
+                                    "schedule: rule '{}' references unknown switch '{}', skipping",
+                                    rule.id, id
+                                );
                             }
-                        },
-                        Action::WaterControl { on } => {
-                            Some(SwitchCommand::WaterControl { on: *on })
                         }
-                    };
-                    if let Some(c) = cmd {
-                        let _ = app.switch_command(c);
+                        Action::WaterControl { on } => {
+                            let _ = app.switch_command(SwitchCommand::WaterControl { on: *on });
+                        }
                     }
                 }
                 last_local = now_local;

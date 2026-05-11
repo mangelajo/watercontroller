@@ -64,7 +64,9 @@ async fn main() {
         });
     }
 
-    let state = http::AppState { app, log_tx };
+    let wifi: std::sync::Arc<dyn watercontroller_core::traits::Wifi> =
+        std::sync::Arc::new(crate::fakes::FakeWifi::connected_to("host-dev", "127.0.0.1"));
+    let state = http::AppState { app, log_tx, wifi };
     let router = http::router(state);
 
     let bind = std::env::var("WC_HOST_BIND").unwrap_or_else(|_| "127.0.0.1:8765".into());

@@ -122,6 +122,7 @@ pub struct ServerHandles {
 pub fn spawn(
     app: App,
     nvs: Arc<dyn NvsStore>,
+    wifi: Arc<dyn watercontroller_core::traits::Wifi>,
     port: u16,
     cert_pem: &str,
     key_pem: &str,
@@ -140,7 +141,7 @@ pub fn spawn(
     http_cfg.stack_size = HTTP_STACK;
     http_cfg.max_uri_handlers = 64;
     let mut http = EspHttpServer::new(&http_cfg)?;
-    register_handlers(&mut http, app.clone(), nvs.clone(), ws_senders.clone())?;
+    register_handlers(&mut http, app.clone(), nvs.clone(), wifi.clone(), ws_senders.clone())?;
     log::info!("http: listening on :{port}");
 
     // HTTPS on :443 when both PEM blobs are present and the component is
@@ -169,7 +170,7 @@ pub fn spawn(
         tls_cfg.private_key = Some(esp_idf_svc::tls::X509::pem(leak_cstr(key_pem)));
         match EspHttpServer::new(&tls_cfg) {
             Ok(mut s) => {
-                register_handlers(&mut s, app.clone(), nvs.clone(), ws_senders.clone())?;
+                register_handlers(&mut s, app.clone(), nvs.clone(), wifi.clone(), ws_senders.clone())?;
                 log::info!("https: listening on :443 (TLS)");
                 Some(s)
             }
@@ -201,6 +202,7 @@ fn register_handlers(
     server: &mut EspHttpServer<'static>,
     app: App,
     nvs: Arc<dyn NvsStore>,
+    wifi: Arc<dyn watercontroller_core::traits::Wifi>,
     ws_senders: Arc<Mutex<Vec<EspHttpWsDetachedSender>>>,
 ) -> Result<()> {
 
@@ -307,24 +309,36 @@ fn register_handlers(
     // this lets the SPA save a single tab without round-tripping the full
     // config payload (~1.5 KiB → 100 B–700 B per section), which means
     // smaller request buffers on the server side.
-    register_section(
-        server,
-        "/api/config/wifi",
-        app.clone(), app.clone(), nvs.clone(),
-        |cfg| cfg.wifi.clone(),
-        |cfg, mut new: WifiConfig| {
-            // Per-network password merge: incoming password empty +
-            // matching SSID in stored config → keep stored.
-            for net in new.networks.iter_mut() {
-                if net.password.is_empty() {
-                    if let Some(o) = cfg.wifi.networks.iter().find(|n| n.ssid == net.ssid) {
-                        net.password = o.password.clone();
+    {
+        // Capture wifi for the wifi-config apply hook so changes to the
+        // network list (add/remove/edit) immediately push the new list
+        // to the supervisor — which will either reconnect to a different
+        // SSID, switch back to STA from AP mode, or (on empty list)
+        // drop into permanent AP mode.
+        let wifi_for_apply = wifi.clone();
+        register_section(
+            server,
+            "/api/config/wifi",
+            app.clone(), app.clone(), nvs.clone(),
+            |cfg| cfg.wifi.clone(),
+            move |cfg, mut new: WifiConfig| {
+                // Per-network password merge: incoming password empty +
+                // matching SSID in stored config → keep stored.
+                for net in new.networks.iter_mut() {
+                    if net.password.is_empty() {
+                        if let Some(o) = cfg.wifi.networks.iter().find(|n| n.ssid == net.ssid) {
+                            net.password = o.password.clone();
+                        }
                     }
                 }
-            }
-            cfg.wifi = new;
-        },
-    )?;
+                cfg.wifi = new;
+                // Push new network list to supervisor. connect() is a no-op
+                // when the list is unchanged, so this is safe to call on
+                // every save (e.g. when only ap_ssid was edited).
+                wifi_for_apply.connect(&cfg.wifi.networks);
+            },
+        )?;
+    }
     register_section(
         server,
         "/api/config/mqtt",
@@ -583,6 +597,46 @@ fn register_handlers(
     for path in CAPTIVE_PROBE_PATHS {
         server.fn_handler::<EspIOError, _>(path, Method::Get, |req| {
             let _ = req.into_response(302, None, &[("Location", "/")])?;
+            Ok(())
+        })?;
+    }
+
+    // GET /api/wifi/scan → trigger a scan and return discovered APs.
+    {
+        let wifi = wifi.clone();
+        server.fn_handler::<EspIOError, _>(routes::WIFI_SCAN, Method::Get, move |req| {
+            match wifi.scan() {
+                Ok(list) => {
+                    let body = serde_json::to_vec(
+                        &watercontroller_core::api::WifiScanResponse { networks: list },
+                    )
+                    .unwrap_or_default();
+                    let mut resp = req.into_response(200, None, JSON_CT)?;
+                    resp.write_all(&body)?;
+                }
+                Err(msg) => {
+                    let body = serde_json::to_vec(&ApiError::new(msg)).unwrap_or_default();
+                    let mut resp = req.into_response(503, None, JSON_CT)?;
+                    resp.write_all(&body)?;
+                }
+            }
+            Ok(())
+        })?;
+    }
+
+    // POST /api/wifi/reconnect → force the supervisor to drop the current
+    // association and re-evaluate the network list. Used by the SPA when a
+    // user wants to retry after changing networks without losing the
+    // current config.
+    {
+        let wifi = wifi.clone();
+        let app = app.clone();
+        server.fn_handler::<EspIOError, _>("/api/wifi/reconnect", Method::Post, move |req| {
+            if require_auth(&req, &app).is_err() {
+                return write_unauthorized(req);
+            }
+            wifi.reconnect();
+            let _ = req.into_response(204, None, &[])?;
             Ok(())
         })?;
     }

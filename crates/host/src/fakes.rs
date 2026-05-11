@@ -191,6 +191,22 @@ impl Wifi for FakeWifi {
     }
     fn connect(&self, _networks: &[WifiCreds]) {}
     fn reconnect(&self) {}
+    fn scan(&self) -> Result<Vec<watercontroller_core::api::WifiScanResult>, String> {
+        Ok(vec![
+            watercontroller_core::api::WifiScanResult {
+                ssid: "FakeNet-2.4G".into(),
+                rssi_dbm: -52,
+                auth: "wpa2".into(),
+                channel: 6,
+            },
+            watercontroller_core::api::WifiScanResult {
+                ssid: "FakeNet-Guest".into(),
+                rssi_dbm: -67,
+                auth: "open".into(),
+                channel: 1,
+            },
+        ])
+    }
 }
 
 #[cfg(test)]

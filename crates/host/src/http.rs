@@ -11,7 +11,8 @@ use axum::{
 };
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use watercontroller_core::api::{routes, ConfigUpdate, SwitchCommand};
+use watercontroller_core::api::{routes, ConfigUpdate, SwitchCommand, WifiScanResponse};
+use watercontroller_core::traits::Wifi;
 use watercontroller_core::config::{
     HttpsConfig, MqttConfig, SensorsConfig, SwitchesConfig, WifiConfig, WireguardConfig,
 };
@@ -34,6 +35,7 @@ struct AuthSection {
 pub struct AppState {
     pub app: App,
     pub log_tx: broadcast::Sender<LogRecord>,
+    pub wifi: Arc<dyn Wifi>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -57,7 +59,24 @@ pub fn router(state: AppState) -> Router {
         .route(routes::SWITCH, post(post_switch))
         .route(routes::LOGS_WS, get(ws_logs))
         .route(routes::FACTORY_RESET, post(post_factory_reset))
+        .route(routes::WIFI_SCAN, get(get_wifi_scan))
+        .route("/api/wifi/reconnect", post(post_wifi_reconnect))
         .with_state(Arc::new(state))
+}
+
+async fn get_wifi_scan(State(s): State<Arc<AppState>>) -> impl IntoResponse {
+    match s.wifi.scan() {
+        Ok(networks) => (StatusCode::OK, Json(serde_json::to_value(&WifiScanResponse { networks }).unwrap())),
+        Err(msg) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "message": msg })),
+        ),
+    }
+}
+
+async fn post_wifi_reconnect(State(s): State<Arc<AppState>>) -> impl IntoResponse {
+    s.wifi.reconnect();
+    StatusCode::NO_CONTENT
 }
 
 async fn post_factory_reset() -> impl IntoResponse {
@@ -121,7 +140,10 @@ async fn put_wifi(State(s): State<Arc<AppState>>, Json(mut new): Json<WifiConfig
         }
     }
     cfg.wifi = new;
-    s.app.replace_config(cfg);
+    s.app.replace_config(cfg.clone());
+    // Mirror the firmware path: any wifi-config save kicks the supervisor
+    // to (re)evaluate the network list and switch AP↔STA as needed.
+    s.wifi.connect(&cfg.wifi.networks);
     StatusCode::NO_CONTENT
 }
 

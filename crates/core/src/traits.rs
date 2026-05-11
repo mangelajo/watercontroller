@@ -98,6 +98,12 @@ pub trait Wifi: Send + Sync {
     fn connect(&self, networks: &[WifiCreds]);
     /// Force a (re)scan + reconnect attempt.
     fn reconnect(&self);
+    /// Trigger a scan and return the discovered access points. Performed
+    /// synchronously from the caller's perspective — the firmware impl
+    /// hands the request to the supervisor and blocks on the result.
+    /// Returns `Err(reason)` if the supervisor isn't ready or the scan
+    /// fails / times out.
+    fn scan(&self) -> Result<Vec<crate::api::WifiScanResult>, String>;
 }
 
 pub mod prelude {
