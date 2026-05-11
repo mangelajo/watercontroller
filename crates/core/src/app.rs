@@ -63,7 +63,7 @@ impl App {
         let s2 = TimedSwitch::new(auto_off_or_none(config.switches.sprinkler_2_auto_off_secs));
 
         // Restore last-known valve state from NVS, if available.
-        let mut valve = WaterValve::new();
+        let mut valve = WaterValve::with_timing(config.switches.valve_timing);
         let restored_state = nvs
             .as_ref()
             .and_then(|n| n.get(NVS_VALVE_STATE))
@@ -124,11 +124,34 @@ impl App {
             .set_auto_off(auto_off_or_none(cfg.switches.sprinkler_1_auto_off_secs));
         self.inner.sprinkler2.lock().unwrap()
             .set_auto_off(auto_off_or_none(cfg.switches.sprinkler_2_auto_off_secs));
+        self.inner.valve.lock().unwrap().set_timing(cfg.switches.valve_timing);
         *self.inner.config.lock().unwrap() = cfg;
     }
 
+    /// Fire a scheduled sprinkler activation with an optional per-run
+    /// duration override (seconds). `None` falls back to the configured
+    /// manual auto-off on the switch. Returns `false` if `id` is unknown.
+    pub fn fire_schedule_sprinkler(&self, id: &str, duration_secs: Option<u32>) -> bool {
+        let now = self.inner.clock.monotonic_ms();
+        let lock = match id {
+            "sprinkler_1" => &self.inner.sprinkler1,
+            "sprinkler_2" => &self.inner.sprinkler2,
+            _ => return false,
+        };
+        let mut s = lock.lock().unwrap();
+        match duration_secs {
+            Some(d) => s.turn_on_for(now, std::time::Duration::from_secs(d as u64)),
+            None => s.turn_on(now),
+        }
+        match duration_secs {
+            Some(d) => log::info!("{id}: ON (schedule, duration {d}s)"),
+            None => log::info!("{id}: ON (schedule)"),
+        }
+        true
+    }
+
     /// Apply a switch command. Returns `Busy` if the water valve is
-    /// mid-sequence (open or close coil energized).
+    /// mid-sequence (motor energized in either direction).
     pub fn switch_command(&self, cmd: SwitchCommand) -> CommandOutcome {
         let now = self.inner.clock.monotonic_ms();
         match cmd {

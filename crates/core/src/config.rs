@@ -168,6 +168,10 @@ pub struct SwitchesConfig {
     /// Auto-off duration for sprinkler_2, in seconds. YAML legacy default 5 min.
     #[serde(default = "default_sprinkler_2_auto_off")]
     pub sprinkler_2_auto_off_secs: u32,
+    /// Water-valve motor pulse + drain timing. Defaults to ESPHome legacy
+    /// values (1 s settle + 14 s pulse + 1 s settle + 5 min drain).
+    #[serde(default)]
+    pub valve_timing: crate::water_valve::ValveTiming,
 }
 fn default_sprinkler_1_auto_off() -> u32 { 7 * 60 }
 fn default_sprinkler_2_auto_off() -> u32 { 5 * 60 }
@@ -177,6 +181,7 @@ impl Default for SwitchesConfig {
         Self {
             sprinkler_1_auto_off_secs: default_sprinkler_1_auto_off(),
             sprinkler_2_auto_off_secs: default_sprinkler_2_auto_off(),
+            valve_timing: crate::water_valve::ValveTiming::default(),
         }
     }
 }

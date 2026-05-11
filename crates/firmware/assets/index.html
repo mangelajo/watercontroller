@@ -393,6 +393,31 @@
           <span class="status-msg" id="sprinklers-msg"></span>
         </div>
       </section>
+
+      <section class="card full">
+        <h2>Water valve timing</h2>
+        <p class="status-msg">The motorized valve opens/closes the water circuit. After a close,
+          the drain output (GPIO25) is held high to evacuate the pipes. The drain does
+          <strong>not</strong> block subsequent commands — requesting "open" mid-drain stops the drain
+          immediately and starts the open sequence. Set drain duration to <code>0</code> to skip the
+          drain phase entirely.</p>
+        <div class="grid2">
+          <div class="field">
+            <label for="valve-motor">Motor run (seconds)</label>
+            <input type="number" min="1" max="120" step="1" id="valve-motor">
+            <span class="hint">Default 14 s — time the motor needs to fully open or close.</span>
+          </div>
+          <div class="field">
+            <label for="valve-drain">Drain hold (seconds)</label>
+            <input type="number" min="0" max="3600" step="1" id="valve-drain">
+            <span class="hint">Default 300 s (5 min). 0 disables the drain phase.</span>
+          </div>
+        </div>
+        <div class="row">
+          <button class="btn primary" id="valve-save">Save valve timing</button>
+          <span class="status-msg" id="valve-msg"></span>
+        </div>
+      </section>
     </section>
 
     <!-- ====== Schedule ====== -->
@@ -1037,12 +1062,27 @@
     const fmtSecs = v => v === 0 ? "no auto-off" : v >= 60 ? `${Math.round(v/60)} min auto-off` : `${v} s auto-off`;
     $("#s1-sub").textContent = fmtSecs(s1Secs);
     $("#s2-sub").textContent = fmtSecs(s2Secs);
+    // Water-valve timing. Defaults match ValveTiming::default() in core.
+    const v = s.valve_timing || (s.valve_timing = {});
+    $("#valve-motor").value = v.motor_run_secs ?? 14;
+    $("#valve-drain").value = v.drain_secs     ?? 300;
   }
   $("#sprinklers-save").addEventListener("click", () => {
     if (!currentConfig.switches) currentConfig.switches = {};
     currentConfig.switches.sprinkler_1_auto_off_secs = Math.round((+$("#s1-mins").value || 0) * 60);
     currentConfig.switches.sprinkler_2_auto_off_secs = Math.round((+$("#s2-mins").value || 0) * 60);
     saveConfig("sprinklers");
+  });
+  $("#valve-save").addEventListener("click", () => {
+    if (!currentConfig.switches) currentConfig.switches = {};
+    currentConfig.switches.valve_timing = {
+      motor_run_secs: Math.max(1, +$("#valve-motor").value | 0),
+      drain_secs:     Math.max(0, +$("#valve-drain").value | 0),
+    };
+    // The valve timing lives inside the same `switches` section as the
+    // sprinkler auto-off — one PUT covers both.
+    saveConfig("sprinklers");
+    msgOk("#valve-msg", "saved");
   });
 
   // MQTT
@@ -1098,6 +1138,7 @@
       <div class="field" style="min-width: 240px;"><label>Days (empty = all)</label>
         <span data-bind="dow">${DOW_NAMES.map((d, j) => `
           <label style="margin-right: 6px;"><input type="checkbox" data-dow="${j}"> ${d}</label>`).join("")}</span></div>
+      <div class="field" style="min-width: 110px;"><label>Duration (min)</label><input type="number" min="0" step="1" data-bind="duration" placeholder=""></div>
       <div class="field" style="min-width: 80px;"><label>Enabled</label><input type="checkbox" data-bind="enabled"></div>
       <button class="remove" type="button">Remove</button>`;
     row.querySelector('[data-bind="id"]').value = rule.id;
@@ -1108,6 +1149,15 @@
       const cb = row.querySelector(`[data-dow="${d}"]`); if (cb) cb.checked = true;
     }
     row.querySelector('[data-bind="enabled"]').checked = rule.enabled;
+    const durInput = row.querySelector('[data-bind="duration"]');
+    durInput.value = rule.duration_secs != null ? Math.round(rule.duration_secs / 60) : "";
+    const refreshDurEnabled = () => {
+      const isSwitch = row.querySelector('[data-bind="action"]').value.startsWith("switch:");
+      durInput.disabled = !isSwitch;
+      if (!isSwitch) durInput.value = "";
+    };
+    row.querySelector('[data-bind="action"]').addEventListener("change", refreshDurEnabled);
+    refreshDurEnabled();
     row.querySelector(".remove").addEventListener("click", () => {
       currentConfig.schedule.rules.splice(i, 1); renderSchedule();
     });
@@ -1118,6 +1168,7 @@
       id: `rule_${currentConfig.schedule.rules.length + 1}`,
       action: { kind: "switch", id: "sprinkler_1" },
       hours: [10], minutes: [0], days_of_week: [], enabled: true,
+      duration_secs: null,
     });
     renderSchedule();
   });
@@ -1126,14 +1177,18 @@
     currentConfig.schedule.rules = Array.from(list).map(row => {
       const action = row.querySelector('[data-bind="action"]').value;
       const [kind, val] = action.split(":");
+      const isSwitch = kind === "switch";
+      const durRaw = row.querySelector('[data-bind="duration"]').value.trim();
+      const durMin = durRaw === "" ? null : parseInt(durRaw, 10);
       return {
         id: row.querySelector('[data-bind="id"]').value,
-        action: kind === "switch" ? { kind: "switch", id: val } : { kind: "water_control", on: val === "on" },
+        action: isSwitch ? { kind: "switch", id: val } : { kind: "water_control", on: val === "on" },
         hours: parseList(row.querySelector('[data-bind="hours"]').value),
         minutes: parseList(row.querySelector('[data-bind="minutes"]').value),
         days_of_week: Array.from(row.querySelectorAll('[data-dow]'))
           .filter(c => c.checked).map(c => +c.dataset.dow),
         enabled: row.querySelector('[data-bind="enabled"]').checked,
+        duration_secs: (isSwitch && Number.isFinite(durMin) && durMin > 0) ? durMin * 60 : null,
       };
     });
     saveConfig("schedule");
