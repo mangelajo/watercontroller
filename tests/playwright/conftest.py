@@ -162,14 +162,31 @@ def _terminal_writer(_config=None):
     """Return a callable that prints a progress line to the actual
     terminal regardless of pytest's output capture state.
 
-    Why bypass `terminalreporter`: it routes through the captured
-    stdout (and depending on pytest's version the line ends up
-    buffered until the surrounding test finishes), so a 30 s flash +
-    boot phase looks like a frozen prompt. Writing directly to
-    `sys.__stderr__` is unbuffered and unaffected by capture, so the
-    user sees `device-setup: …` and `cli: …` lines live."""
+    Pytest's default `--capture=fd` redirects fds 1 and 2 at OS level,
+    which catches `sys.stderr`, `sys.__stderr__`, AND `print()` alike.
+    The only reliable bypass on POSIX is opening `/dev/tty` directly —
+    that's a fresh fd to the controlling terminal, untouched by
+    pytest's redirect. We fall back to `sys.__stderr__` for non-tty
+    environments (CI logs, redirected output) so the messages are at
+    least preserved in the captured stream."""
+    tty = None
+    try:
+        tty = open("/dev/tty", "w", buffering=1)  # line-buffered
+    except OSError:
+        tty = None
+
     def write(msg: str) -> None:
+        # Always dump to __stderr__ too — captured by pytest but kept in
+        # the "Captured stderr" section of test reports and visible via
+        # `pytest -s`. /dev/tty handles the live-terminal case.
+        if tty is not None:
+            try:
+                tty.write(msg + "\n")
+                tty.flush()
+            except OSError:
+                pass
         print(msg, file=sys.__stderr__, flush=True)
+
     return write
 
 
@@ -178,6 +195,57 @@ def term(pytestconfig):
     """Expose the terminal writer to tests/fixtures that want to surface
     progress (e.g. each `>>` command/response in the serial CLI suite)."""
     return _terminal_writer(pytestconfig)
+
+
+def _fetch_diag(url: str, timeout: float = 3.0) -> dict | None:
+    """Cheap stdlib-only GET of /api/diag. Returns parsed JSON or None on
+    error — never raises, so a missed poll doesn't fail an unrelated test."""
+    import json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"{url}/api/diag", timeout=timeout) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
+
+
+def _format_diag(d: dict, tag: str) -> str:
+    heap = d.get("heap", {})
+    tasks = {t["name"]: t.get("stack_min_free_bytes") for t in d.get("tasks", [])}
+    # Surface the tasks whose stacks we tune most often. `?` keeps the
+    # column count stable when a task name moves or isn't present (e.g.
+    # we're running an older build).
+    def hwm(name: str) -> str:
+        v = tasks.get(name)
+        return f"{v:,}" if isinstance(v, int) else "?"
+
+    free = heap.get("total_free_bytes", 0)
+    minfree = heap.get("min_ever_free_bytes", 0)
+    return (
+        f"diag[{tag}]: heap free={free:,} min={minfree:,} | "
+        f"hwm wifi-sup={hwm('wifi-sup')} "
+        f"serial-cli={hwm('serial-cli')} "
+        f"httpd={hwm('httpd')} "
+        f"sys_evt={hwm('sys_evt')}"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _post_test_diag(request, real_target_url, term):
+    """After each test, fetch /api/diag and print a one-line heap +
+    stack-HWM summary. Skipped silently when we're not running against
+    a real device, or when /api/diag isn't reachable (a crashed device
+    shouldn't make every test report an extra failure — the test that
+    actually broke things will show the cause)."""
+    yield
+    if not real_target_url:
+        return
+    d = _fetch_diag(real_target_url)
+    if d is None:
+        term(f"diag[{request.node.name}]: device unreachable for diag poll")
+        return
+    term(_format_diag(d, request.node.name))
 
 
 @pytest.fixture(scope="session")
