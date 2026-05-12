@@ -27,6 +27,36 @@ jobs:
         run: cargo clippy -p watercontroller-core -p watercontroller-host -- -D warnings
         continue-on-error: true
 
+  playwright:
+    name: playwright host suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build host binary
+        run: cargo build -p watercontroller-host --release
+      - name: Install pytest + playwright (no jumpstarter device tests)
+        # Drop the jumpstarter-* lines from requirements.txt: they pull
+        # heavy gRPC deps and the device tests auto-skip without
+        # JUMPSTARTER_HOST anyway.
+        run: |
+          grep -v '^jumpstarter\|^pexpect' tests/playwright/requirements.txt > /tmp/req.txt
+          pip install -r /tmp/req.txt
+          playwright install --with-deps chromium
+      - name: Run playwright host suite
+        run: |
+          # No JUMPSTARTER_HOST / WC_TEST_TARGET_URL → conftest spawns
+          # the host binary. Device-only tests (test_serial_cli, soak)
+          # skip themselves.
+          pytest tests/playwright -v --tb=short
+
   firmware-build:
     name: firmware container build (smoke)
     runs-on: ubuntu-latest
