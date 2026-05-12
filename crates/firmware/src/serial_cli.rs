@@ -276,17 +276,27 @@ fn list_networks(app: &App) {
     }
 }
 
-/// Flow alarm status — config + latched state.
+/// Flow alarm status — config + latched state. Each `println!` is
+/// kept to a single dynamic argument because `core::fmt` grows the
+/// stack by ~700 B per `{}` placeholder, and serial-cli's 8 KiB task
+/// stack has only a few hundred bytes of headroom. The previous
+/// 5-arg implementation panicked on real hardware (LoadProhibited
+/// after the line printed — likely a stack-overflow corruption that
+/// surfaced one tick later in the wifi-probe path).
 #[inline(never)]
 fn print_alarm_status(app: &App) {
     let cfg = app.config();
-    let a = &cfg.flow_alarm;
     let snap = app.snapshot();
     let active = if snap.alarm.active { "ACTIVE" } else { "idle" };
-    println!(
-        ">> flow alarm: {active} | enabled={} threshold={:.1} L/h duration={} s | elapsed={} s",
-        a.enabled, a.threshold_lph, a.duration_secs, snap.alarm.elapsed_secs
-    );
+    println!(">> flow alarm: {active}");
+    let enabled = cfg.flow_alarm.enabled;
+    println!(">>   enabled       : {enabled}");
+    let threshold = cfg.flow_alarm.threshold_lph as i32;
+    println!(">>   threshold     : {threshold} L/h");
+    let duration = cfg.flow_alarm.duration_secs;
+    println!(">>   duration      : {duration} s");
+    let elapsed = snap.alarm.elapsed_secs;
+    println!(">>   elapsed       : {elapsed} s");
 }
 
 /// Tabulated task list — same data as `/api/diag`. Columns sized for a

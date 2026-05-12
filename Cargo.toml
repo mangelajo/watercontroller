@@ -22,4 +22,9 @@ serde_json = "1"
 opt-level = "s"
 lto = true
 codegen-units = 1
-strip = true
+# Keep function symbols in the firmware ELF so panic backtraces can
+# be decoded with `xtensa-esp32-elf-addr2line`. Debug info (DWARF) is
+# still dropped to keep the image size down. The kept .symtab section
+# costs ~80 KiB; without it a `Guru Meditation Error … Backtrace:
+# 0x4014c90a:…` is opaque.
+strip = "debuginfo"

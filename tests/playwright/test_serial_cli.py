@@ -152,7 +152,9 @@ def test_serial_cli_alarm_status_and_clear(console):
     been mutated by other test runs against the same NVS — just the
     structure of the response."""
     console.sendline("alarm status")
-    console.expect(rb">> flow alarm: (ACTIVE|idle) \| enabled=(true|false)", timeout=10)
+    console.expect(rb">> flow alarm: (ACTIVE|idle)", timeout=10)
+    console.expect(rb">>\s+enabled\s+:\s+(true|false)", timeout=5)
+    console.expect(rb">>\s+threshold\s+:\s+\d+ L/h", timeout=5)
     console.sendline("alarm clear")
     console.expect(rb">> alarm cleared", timeout=10)
     console.sendline("alarm bogus")
