@@ -46,7 +46,7 @@ pub fn spawn(
     // clear`) still do an explicit `(*app.config()).clone()` to get
     // an owned Config for the mutation, but those run on a flat call
     // chain (no nested format machinery), so they fit comfortably.
-    crate::task_util::spawn_named(c"serial-cli", 8 * 1024, move || {
+    crate::task_util::spawn_named(c"serial-cli", 10 * 1024, move || {
         run(app, nvs, wifi);
     });
 }
@@ -304,24 +304,40 @@ fn print_alarm_status(app: &App) {
 /// alignment. `#[inline(never)]` so the snapshot's Vec + per-row format
 /// frame doesn't bloat the dispatch parent.
 #[inline(never)]
+#[inline(never)]
+fn fmt_task_header() -> String {
+    format!(
+        "{:<16} {:<10} {:>3} {:>10} {:>12}",
+        "NAME", "STATE", "PRI", "STACK_FREE", "RUNTIME"
+    )
+}
+
+#[inline(never)]
+fn fmt_task_row(t: &crate::diag::TaskInfo) -> String {
+    let name: String = t.name.chars().take(16).collect();
+    format!(
+        "{:<16} {:<10} {:>3} {:>10} {:>12}",
+        name, t.state, t.priority, t.stack_min_free_bytes, t.run_time
+    )
+}
+
 fn print_tasks() {
     let snap = crate::diag::snapshot();
-    println!(
-        ">> {:<16} {:<10} {:>3} {:>10} {:>12}",
-        "NAME", "STATE", "PRI", "STACK_FREE", "RUNTIME"
-    );
-    println!(">> {}", "-".repeat(56));
-    // Sort by stack-min-free ascending: the most-pressured task surfaces
-    // at the top, which is what you usually want when running `tasks`
-    // to debug a near-overflow.
+    // Each row is formatted in an #[inline(never)] helper so the 5-arg
+    // `format!` machinery (~3.5 KB transient frame on this task) lives
+    // only while the helper is on the stack, not as part of this
+    // function's permanent locals or the caller's. The println! then
+    // takes a single &String argument, which the format machinery
+    // collapses to one ~700 B `&dyn Display` frame. See CLAUDE.md.
+    let header = fmt_task_header();
+    println!(">> {header}");
+    let sep = "-".repeat(56);
+    println!(">> {sep}");
     let mut rows = snap.tasks;
     rows.sort_by_key(|t| t.stack_min_free_bytes);
-    for t in rows {
-        let name: String = t.name.chars().take(16).collect();
-        println!(
-            ">> {:<16} {:<10} {:>3} {:>10} {:>12}",
-            name, t.state, t.priority, t.stack_min_free_bytes, t.run_time
-        );
+    for t in rows.iter() {
+        let line = fmt_task_row(t);
+        println!(">> {line}");
     }
 }
 
