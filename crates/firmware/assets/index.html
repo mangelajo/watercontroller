@@ -155,6 +155,25 @@
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   @media (max-width: 600px) { .grid2 { grid-template-columns: 1fr; } }
 
+  /* Mobile: pad the layout in, make tap targets at least 44 px (per
+     iOS HIG / Material accessibility guidance), and stretch action
+     buttons to the row so the most-used controls land under a thumb. */
+  @media (max-width: 600px) {
+    main { padding: 12px; }
+    .card { padding: 14px; }
+    .toggle { width: 56px; height: 32px; border-radius: 16px; }
+    .toggle::after { width: 26px; height: 26px; top: 3px; left: 3px; }
+    .toggle.on::after { left: 27px; }
+    .toggle.busy::after { left: 15px; }
+    .switch-row { padding: 14px 12px; min-height: 44px; }
+    button, input[type="text"], input[type="password"], input[type="number"], input[type="url"], select {
+      min-height: 44px;
+    }
+    button { width: 100%; }
+    nav.tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    nav.tabs button { flex-shrink: 0; }
+  }
+
   .list-row {
     display: flex; gap: 8px; align-items: end;
     padding: 8px; background: var(--panel-2);
