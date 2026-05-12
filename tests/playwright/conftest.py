@@ -32,6 +32,15 @@ from playwright.sync_api import APIRequestContext, Playwright
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--soak",
+        action="store_true",
+        default=False,
+        help="Run the long-running soak test (tests/playwright/test_soak.py).",
+    )
 DEVICE_BOOT_TIMEOUT_S = float(os.environ.get("WC_DEVICE_BOOT_TIMEOUT_S", "45"))
 # Pattern esp_netif prints to UART once DHCP lands. The supervisor's
 # follow-up `wifi: connected to <ssid> (<ip>)` line is also a fine
