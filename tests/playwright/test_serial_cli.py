@@ -25,36 +25,32 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def console(jumpstarter_client, real_target_url, term):
-    """Attach a pexpect console to the ESP32's UART. Depends on
-    `real_target_url` so the session-level flash+boot has already
-    completed before we try to grab the port — otherwise our adapter
-    would race against `esp32.flash` for the FTDI lock."""
-    from jumpstarter_driver_network.adapters import PexpectAdapter
-
-    assert jumpstarter_client is not None, "JUMPSTARTER_HOST present but client is None"
-    _ = real_target_url  # only bound to force the device-setup dependency
-    term("cli: attaching pexpect adapter over client.serial")
-    with PexpectAdapter(client=jumpstarter_client.serial) as c:
-        n = Narrator(c, term)
-        # Quiet info-level chatter (heartbeats, wifi events, https
-        # handshakes) for the duration of the test so they don't
-        # interleave with the `>>` lines we're matching on.
+def console(device_console, real_target_url, term):
+    """Wrap the session-scoped `device_console` in a Narrator for this
+    test. The underlying PexpectAdapter is owned by the session — we
+    don't attach/detach per test, so serial-output mirroring to
+    stderr (logfile_read in conftest.device_console) stays
+    continuous across tests."""
+    assert device_console is not None, "JUMPSTARTER_HOST present but device_console missing"
+    _ = real_target_url  # force the boot+IP-detect to complete first
+    n = Narrator(device_console, term)
+    # Quiet info-level chatter (heartbeats, wifi events, https
+    # handshakes) for the duration of the test so they don't
+    # interleave with the `>>` lines we're matching on.
+    try:
+        n.sendline("log warn")
+        n.expect(rb">> log level set to warn", timeout=5)
+    except Exception:
+        term("cli: warn-level set attempt failed (older firmware?) — continuing")
+    try:
+        yield n
+    finally:
+        # Best-effort restore so other channels (manual serial,
+        # different test session) see default verbosity.
         try:
-            n.sendline("log warn")
-            n.expect(rb">> log level set to warn", timeout=5)
+            n.sendline("log info")
         except Exception:
-            term("cli: warn-level set attempt failed (older firmware?) — continuing")
-        try:
-            yield n
-        finally:
-            # Best-effort restore so other channels (manual serial,
-            # different test session) see default verbosity.
-            try:
-                n.sendline("log info")
-            except Exception:
-                pass
-    term("cli: console detached")
+            pass
 
 
 class Narrator:

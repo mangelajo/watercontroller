@@ -88,26 +88,23 @@ def jumpstarter_client(term):
         term("jumpstarter: releasing client")
 
 
-def _reset_and_detect_ip(client, log) -> str:
+def _reset_and_detect_ip(client, console, log) -> str:
     """Reset the board and return the DHCP-assigned IP read from the
     boot serial output. Assumes the firmware is already flashed — the
     `device-test` make target handles the (one-shot) flash up front.
 
-    `log` is a callable taking a single string; progress messages flow
-    through it so the user sees what's happening during the ~5 s boot
-    + DHCP wait (otherwise pytest's first test appears to hang).
+    `console` is the long-lived session pexpect adapter; reusing it
+    keeps the serial-output mirroring (logfile_read) continuous from
+    session start. `log` writes progress lines to the live terminal.
     """
-    from jumpstarter_driver_network.adapters import PexpectAdapter
-
-    log("device-setup: attaching console, resetting, waiting for sta ip…")
-    with PexpectAdapter(client=client.serial) as console:
-        client.esp32.hard_reset()
-        console.expect(_STA_IP_PATTERN, timeout=DEVICE_BOOT_TIMEOUT_S)
-        ip = console.match.group(1)
-        if isinstance(ip, bytes):
-            ip = ip.decode()
-        log(f"device-setup: device IP {ip}")
-        return ip
+    log("device-setup: resetting, waiting for sta ip…")
+    client.esp32.hard_reset()
+    console.expect(_STA_IP_PATTERN, timeout=DEVICE_BOOT_TIMEOUT_S)
+    ip = console.match.group(1)
+    if isinstance(ip, bytes):
+        ip = ip.decode()
+    log(f"device-setup: device IP {ip}")
+    return ip
 
 
 # ----------------------------------------------------------------------------
@@ -214,7 +211,46 @@ def on_real_device(real_target_url) -> bool:
 
 
 @pytest.fixture(scope="session")
-def real_target_url(jumpstarter_client, term) -> str | None:
+def device_console(jumpstarter_client, term):
+    """Long-lived pexpect adapter over the device's UART, live for the
+    whole test session when JUMPSTARTER_HOST is set, else `None`.
+
+    Mirrors every byte the device emits to `sys.__stderr__` so the
+    serial trail is visible live under `pytest -s` and lands in
+    pytest's "Captured stderr" section on a failure — same pattern as
+    the jumpstarter-dev soc-pytest example (`console.logfile_read =
+    sys.stdout.buffer`). Without this you have to re-attach
+    `j serial pipe` by hand to diagnose what the firmware was saying
+    when a test failed.
+
+    Reused by `real_target_url` (for the boot `sta ip:` probe) and by
+    the serial-CLI tests (for `sendline` / `expect`). Since the lab
+    gRPC layer holds the FTDI flock exclusively, sharing a single
+    adapter is the only way to keep serial captured across phases.
+    """
+    if jumpstarter_client is None:
+        yield None
+        return
+    from jumpstarter_driver_network.adapters import PexpectAdapter
+    term("serial: attaching session console (mirror → stderr)")
+    with PexpectAdapter(client=jumpstarter_client.serial) as console:
+        # pexpect spawns expose `logfile_read` — every byte consumed by
+        # the matcher is also written here. We use the real stderr fd
+        # (sys.__stderr__) so pytest's per-test fd-capture picks it up
+        # for failure reports; under `pytest -s` it just flows straight
+        # through to the user's terminal.
+        try:
+            console.logfile_read = sys.__stderr__.buffer
+        except Exception:
+            # If the underlying stream doesn't have a `.buffer` (rare
+            # — happens under some IDE runners) fall back to silent.
+            pass
+        yield console
+    term("serial: session console detached")
+
+
+@pytest.fixture(scope="session")
+def real_target_url(jumpstarter_client, device_console, term) -> str | None:
     """Resolve where the test session should run:
 
     1. `WC_TEST_TARGET_URL` — point at an already-running device.
@@ -228,7 +264,8 @@ def real_target_url(jumpstarter_client, term) -> str | None:
         term(f"target: using WC_TEST_TARGET_URL={env_url}")
         return env_url.rstrip("/")
     if jumpstarter_client is not None:
-        ip = _reset_and_detect_ip(jumpstarter_client, term)
+        assert device_console is not None
+        ip = _reset_and_detect_ip(jumpstarter_client, device_console, term)
         return f"http://{ip}"
     term("target: no device — falling back to local host binary")
     return None
