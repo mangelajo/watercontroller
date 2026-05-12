@@ -65,6 +65,8 @@ pub mod routes {
     pub const WIFI_SCAN: &str = "/api/wifi/scan";
     /// POST: clear the latched flow-rate alarm.
     pub const ALARM_CLEAR: &str = "/api/alarm/clear";
+    /// GET: list past flow-alarm fires (oldest first), persisted in NVS.
+    pub const ALARM_HISTORY: &str = "/api/alarm/history";
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

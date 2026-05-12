@@ -9,11 +9,17 @@
 
 use crate::api::{CommandOutcome, SwitchCommand};
 use crate::config::Config;
-use crate::state::{DeviceState, DeviceSnapshot, WaterControlState};
+use crate::state::{AlarmEvent, DeviceState, DeviceSnapshot, WaterControlState};
 use crate::switch::TimedSwitch;
 use crate::traits::{Clock, NvsStore};
 use crate::water_valve::{ValveOutputs, WaterValve};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+
+/// Cap on the in-memory alarm history ring. Sized to fit comfortably in
+/// a single NVS blob (~16 events × ~50 bytes JSON each = under 1 KiB).
+const ALARM_HISTORY_CAP: usize = 16;
+const NVS_ALARM_HISTORY: &str = "wc.almhist";
 
 /// NVS key holding the user-visible desired state of the composite water
 /// control switch ("on" / "off"). Persisted on every transition so a crash
@@ -46,6 +52,9 @@ struct AppInner {
     /// transitions, slower at idle), so we count real time rather than
     /// ticks.
     flow_alarm_last_check_ms: Mutex<Option<u64>>,
+    /// Most-recent-last ring of past alarm fires. Persisted to NVS so
+    /// it survives reboot (last 16, ~1 KiB blob).
+    alarm_history: Mutex<VecDeque<AlarmEvent>>,
 }
 
 impl App {
@@ -83,6 +92,19 @@ impl App {
             valve.restore(on);
         }
 
+        let history = nvs
+            .as_ref()
+            .and_then(|n| n.get(NVS_ALARM_HISTORY))
+            .and_then(|b| serde_json::from_slice::<Vec<AlarmEvent>>(&b).ok())
+            .map(|v| {
+                let mut d = VecDeque::with_capacity(ALARM_HISTORY_CAP);
+                for e in v.into_iter().rev().take(ALARM_HISTORY_CAP).rev() {
+                    d.push_back(e);
+                }
+                d
+            })
+            .unwrap_or_default();
+
         Self {
             inner: Arc::new(AppInner {
                 clock,
@@ -94,7 +116,30 @@ impl App {
                 nvs,
                 last_persisted_valve: Mutex::new(restored_state),
                 flow_alarm_last_check_ms: Mutex::new(None),
+                alarm_history: Mutex::new(history),
             }),
+        }
+    }
+
+    /// Snapshot of past alarm fires (oldest first). Bounded at
+    /// `ALARM_HISTORY_CAP`.
+    pub fn alarm_history(&self) -> Vec<AlarmEvent> {
+        self.inner.alarm_history.lock().unwrap().iter().cloned().collect()
+    }
+
+    fn record_alarm_event(&self, ev: AlarmEvent) {
+        let snapshot = {
+            let mut h = self.inner.alarm_history.lock().unwrap();
+            if h.len() == ALARM_HISTORY_CAP {
+                h.pop_front();
+            }
+            h.push_back(ev);
+            h.iter().cloned().collect::<Vec<_>>()
+        };
+        if let Some(nvs) = &self.inner.nvs {
+            if let Ok(bytes) = serde_json::to_vec(&snapshot) {
+                let _ = nvs.set(NVS_ALARM_HISTORY, &bytes);
+            }
         }
     }
 
@@ -343,6 +388,13 @@ impl App {
             log::error!(
                 "flow alarm FIRED: flow {flow:.1} L/h ≥ {threshold:.1} L/h sustained ≥ {duration}s — closing water_control"
             );
+            let epoch_secs = self.inner.clock.now().timestamp().max(0) as u64;
+            self.record_alarm_event(AlarmEvent {
+                epoch_secs,
+                uptime_ms: now_ms,
+                flow_lph: flow,
+                duration_secs: duration,
+            });
             let _ = self.switch_command(SwitchCommand::WaterControl { on: false });
         } else if was_active
             && matches!(snap.switches.water_control, WaterControlState::On)
@@ -524,6 +576,27 @@ mod tests {
         clock.advance(1_000);
         app.tick();
         assert_eq!(app.snapshot().alarm.elapsed_secs, 0);
+    }
+
+    #[test]
+    fn flow_alarm_records_history_on_fire() {
+        let clock = Arc::new(TestClock::new());
+        let app = App::new(clock.clone(), Config::default());
+        arm_alarm(&app, 50.0, 5);
+        assert!(app.alarm_history().is_empty());
+
+        set_flow(&app, 100.0);
+        app.tick();
+        clock.advance(6_000);
+        app.tick();
+        let h = app.alarm_history();
+        assert_eq!(h.len(), 1);
+        assert!(h[0].flow_lph >= 50.0);
+        assert_eq!(h[0].duration_secs, 5);
+
+        // Clearing the latch keeps the history.
+        app.clear_flow_alarm();
+        assert_eq!(app.alarm_history().len(), 1);
     }
 
     #[test]

@@ -664,6 +664,19 @@ fn register_handlers(
         })?;
     }
 
+    // GET /api/alarm/history → list past flow-alarm fires.
+    {
+        let app = app.clone();
+        server.fn_handler::<EspIOError, _>(routes::ALARM_HISTORY, Method::Get, move |req| {
+            let events = app.alarm_history();
+            let body = serde_json::to_vec(&serde_json::json!({ "events": events }))
+                .unwrap_or_default();
+            let mut resp = req.into_response(200, None, JSON_CT)?;
+            resp.write_all(&body)?;
+            Ok(())
+        })?;
+    }
+
     // POST /api/factory_reset → erase NVS config and reboot.
     {
         let nvs = nvs.clone();

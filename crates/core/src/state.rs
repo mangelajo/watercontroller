@@ -71,6 +71,22 @@ pub struct FlowAlarm {
     pub elapsed_secs: u32,
 }
 
+/// One recorded flow-alarm fire. Stored in a small ring (most-recent
+/// last) on the device so a post-incident look at "what happened last
+/// Tuesday" doesn't require trawling HA history.
+#[derive(Debug, Clone, serde::Deserialize, Serialize, PartialEq)]
+pub struct AlarmEvent {
+    /// Wall-clock epoch seconds at the moment of firing. 0 if the
+    /// device hasn't synced time yet — uptime_ms is the fallback.
+    pub epoch_secs: u64,
+    /// Device uptime at fire-time, for ordering when epoch is unset.
+    pub uptime_ms: u64,
+    /// Flow rate that triggered the latch (L/h).
+    pub flow_lph: f32,
+    /// Configured sustained-duration that was breached (seconds).
+    pub duration_secs: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct DeviceSnapshot {
     pub sensors: Sensors,

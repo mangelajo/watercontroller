@@ -64,6 +64,7 @@ pub fn router(state: AppState) -> Router {
         .route(routes::WIFI_SCAN, get(get_wifi_scan))
         .route("/api/wifi/reconnect", post(post_wifi_reconnect))
         .route(routes::ALARM_CLEAR, post(post_alarm_clear))
+        .route(routes::ALARM_HISTORY, get(get_alarm_history))
         .with_state(Arc::new(state))
 }
 
@@ -98,6 +99,10 @@ async fn put_flow_alarm(
 async fn post_alarm_clear(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     s.app.clear_flow_alarm();
     StatusCode::NO_CONTENT
+}
+
+async fn get_alarm_history(State(s): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({ "events": s.app.alarm_history() }))
 }
 
 async fn post_factory_reset() -> impl IntoResponse {
