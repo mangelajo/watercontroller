@@ -96,7 +96,19 @@ def _reset_and_detect_ip(client, console, log) -> str:
     `console` is the long-lived session pexpect adapter; reusing it
     keeps the serial-output mirroring (logfile_read) continuous from
     session start. `log` writes progress lines to the live terminal.
+
+    Set `WC_NO_RESET=1` to skip the hard reset and adopt whatever
+    state the device is currently in. Useful for fast iteration loops
+    where you only changed test code, not firmware — saves the ~5 s
+    boot + DHCP wait. The cost is determinism: latched state, mid-
+    sequence valves, etc. survive into the next session.
     """
+    skip_reset = os.environ.get("WC_NO_RESET", "").lower() in ("1", "true", "yes")
+    if skip_reset:
+        log("device-setup: WC_NO_RESET set — skipping reset, adopting current state")
+        ip = _adopt_running_ip(log)
+        return ip
+
     log("device-setup: resetting, waiting for sta ip…")
     client.esp32.hard_reset()
     console.expect(_STA_IP_PATTERN, timeout=DEVICE_BOOT_TIMEOUT_S)
@@ -104,7 +116,60 @@ def _reset_and_detect_ip(client, console, log) -> str:
     if isinstance(ip, bytes):
         ip = ip.decode()
     log(f"device-setup: device IP {ip}")
+
+    # Sanity check: the freshly-reset device should report a tiny
+    # uptime via /api/status. If we somehow got an IP from a stale
+    # boot (e.g. reset didn't take, or the regex matched bytes left
+    # in pexpect's buffer from a previous session), uptime would be
+    # much higher and tests would run against unknown state.
+    _assert_fresh_boot(ip, log)
     return ip
+
+
+def _adopt_running_ip(log) -> str:
+    """When WC_NO_RESET is set, find the device IP from /api/status
+    on an env-provided hint, or fall back to mDNS. Refuses to guess
+    blindly — if neither is reachable, the caller should reset."""
+    import json
+    import urllib.request
+
+    hint = os.environ.get("WC_DEVICE_IP") or "doremorwater.local"
+    try:
+        with urllib.request.urlopen(f"http://{hint}/api/status", timeout=3) as r:
+            json.loads(r.read())
+        log(f"device-setup: adopted running device at {hint}")
+        return hint
+    except Exception as e:
+        raise RuntimeError(
+            f"WC_NO_RESET set but {hint}/api/status is unreachable ({e}). "
+            "Set WC_DEVICE_IP to the device's IP, or drop WC_NO_RESET."
+        )
+
+
+def _assert_fresh_boot(ip: str, log) -> None:
+    """Confirm the device just came up. /api/status reports uptime_ms
+    and a fresh reset should be well under 30 s by the time we
+    finished waiting for `sta ip:`. Higher means the reset didn't
+    take effect (or we matched a stale buffer line) and tests would
+    run against unknown state — better to fail loudly here."""
+    import json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"http://{ip}/api/status", timeout=5) as r:
+            uptime_ms = json.loads(r.read()).get("uptime_ms", 0)
+    except Exception as e:
+        # Don't fail the whole session for a transient unreachable —
+        # the device might still be coming up. Just warn.
+        log(f"device-setup: WARNING /api/status unreachable for uptime check: {e}")
+        return
+    if uptime_ms > 30_000:
+        raise RuntimeError(
+            f"device-setup: post-reset uptime is {uptime_ms} ms (>30 s) — "
+            "the reset didn't take effect, refusing to run tests against "
+            "stale state. Power-cycle the board and retry."
+        )
+    log(f"device-setup: fresh boot confirmed (uptime {uptime_ms} ms)")
 
 
 # ----------------------------------------------------------------------------
