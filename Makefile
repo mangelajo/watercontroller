@@ -184,22 +184,35 @@ ota-status: ## quick status snapshot. Usage: make ota-status IP=<addr>
 	@if [ -z "$(IP)" ]; then echo "Usage: make ota-status IP=<device-ip>"; exit 1; fi
 	@curl -s --max-time 5 http://$(IP)/api/status | python3 -m json.tool
 
-# Build the firmware, then run the playwright suite against a real
-# device. Must be invoked from inside an active `jmp shell` session —
-# the suite's session-scoped fixture (tests/playwright/conftest.py)
-# reads JUMPSTARTER_HOST, flashes target/firmware/app.bin, resets the
-# board, and detects the DHCP-assigned IP from the boot serial output.
+# Build + flash + run the playwright suite against a real device.
+# Must be invoked from inside an active `jmp shell` session so
+# JUMPSTARTER_HOST is exported.
 #
-# Override WC_TEST_TARGET_URL to skip flash + detect entirely and run
-# tests against an already-running device.
+# Flow:
+#   1. `make app-image`   — build target/firmware/app.bin (release).
+#   2. wipe otadata + nvs and flash app.bin via `j esp32` (one-shot,
+#      not per-test — pytest only resets between sessions).
+#   3. pytest with the conftest session-fixture which only resets the
+#      board and detects the DHCP-assigned IP.
+#
+# Override WC_TEST_TARGET_URL to skip the flash step and run tests
+# against an already-running device.
 #   jmp shell -l target=esp32
 #   $ make device-test
 #   $ make device-test WC_TEST_TARGET_URL=http://192.168.1.182
 .PHONY: device-test
-device-test: app-image $(PW_SENTINEL) ## build firmware, run playwright suite against the real device (requires active `jmp shell`)
+device-test: app-image $(PW_SENTINEL) ## build + flash firmware, run playwright suite against the real device (requires active `jmp shell`)
 	@if [ -z "$$JUMPSTARTER_HOST" ]; then \
 	    echo "JUMPSTARTER_HOST not set. Run this inside an active \`jmp shell -l target=esp32\` first."; \
 	    exit 1; \
+	fi
+	@if [ -z "$$WC_TEST_TARGET_URL" ]; then \
+	    echo "==> wiping otadata + nvs and flashing $(APP_BIN) (one-shot, before pytest)"; \
+	    dd if=/dev/zero ibs=1 count=8192 2>/dev/null | tr '\0' '\377' > target/firmware/otadata_blank.bin; \
+	    dd if=/dev/zero ibs=1 count=24576 2>/dev/null | tr '\0' '\377' > target/firmware/nvs_blank.bin; \
+	    j esp32 flash --address 0xf000  target/firmware/otadata_blank.bin && \
+	    j esp32 flash --address 0x9000  target/firmware/nvs_blank.bin && \
+	    j esp32 flash --address 0x20000 $(APP_BIN); \
 	fi
 	@tests/playwright/.venv/bin/pytest tests/playwright -v
 

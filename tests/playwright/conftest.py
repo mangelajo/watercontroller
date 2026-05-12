@@ -32,24 +32,7 @@ from playwright.sync_api import APIRequestContext, Playwright
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-APP_BIN = REPO_ROOT / "target/firmware/app.bin"
 DEVICE_BOOT_TIMEOUT_S = float(os.environ.get("WC_DEVICE_BOOT_TIMEOUT_S", "45"))
-# `partitions.csv`: otadata sits at 0xf000, size 0x2000. Writing it to
-# all-1s wipes the OTA selector so the bootloader falls back to ota_0
-# (which is where we serial-flash). Without this, a device that
-# previously OTA'd into ota_1 keeps booting the stale ota_1 image even
-# after we drop a fresh build into ota_0.
-_OTADATA_OFFSET = "0xf000"
-_OTADATA_SIZE = 0x2000
-
-# `partitions.csv`: nvs sits at 0x9000, size 0x6000. Wiping it makes the
-# firmware fall back to compile-time defaults (Config::default()) and
-# the build-time WiFi seed baked from .env, which gives deterministic
-# starting state for every test run. Without this, a previous test that
-# saved e.g. sprinkler auto-off = 3 minutes via /api/config/switches
-# would persist and break later sessions that assume default 7 min.
-_NVS_OFFSET = "0x9000"
-_NVS_SIZE = 0x6000
 # Pattern esp_netif prints to UART once DHCP lands. The supervisor's
 # follow-up `wifi: connected to <ssid> (<ip>)` line is also a fine
 # anchor; we pick the lower-level one because it appears before the
@@ -105,43 +88,16 @@ def jumpstarter_client(term):
         term("jumpstarter: releasing client")
 
 
-def _flash_and_detect_ip(client, log) -> str:
-    """Flash `target/firmware/app.bin`, reset the board, and return the
-    DHCP-assigned IP read from the boot serial output. All driver calls
-    go through the jumpstarter client — no subprocesses, no port killing.
+def _reset_and_detect_ip(client, log) -> str:
+    """Reset the board and return the DHCP-assigned IP read from the
+    boot serial output. Assumes the firmware is already flashed — the
+    `device-test` make target handles the (one-shot) flash up front.
 
     `log` is a callable taking a single string; progress messages flow
-    through it so the user sees what's happening during the 30+ s of
-    setup (otherwise pytest's first test appears to hang).
+    through it so the user sees what's happening during the ~5 s boot
+    + DHCP wait (otherwise pytest's first test appears to hang).
     """
     from jumpstarter_driver_network.adapters import PexpectAdapter
-
-    if not APP_BIN.exists():
-        raise RuntimeError(
-            f"{APP_BIN} not found — run `make app-image` "
-            "(or `make device-test` which does it for you)."
-        )
-
-    # Reset the OTA selector before flashing the app slot. Otherwise a
-    # device that previously OTA'd into ota_1 keeps booting the stale
-    # ota_1 image, even when we just dropped a fresh build into ota_0.
-    blank_otadata = REPO_ROOT / "target/firmware/otadata_blank.bin"
-    blank_otadata.parent.mkdir(parents=True, exist_ok=True)
-    blank_otadata.write_bytes(b"\xff" * _OTADATA_SIZE)
-    log(f"device-setup: wiping otadata @ {_OTADATA_OFFSET}")
-    client.esp32.flash(str(blank_otadata), target=_OTADATA_OFFSET)
-
-    # Wipe NVS so the firmware boots from compile-time defaults +
-    # build-time wifi seed (.env). Without this, NVS state persists
-    # across sessions (saved sprinkler auto-off, OTA'd cert/key, custom
-    # wifi networks) and breaks tests that assume defaults.
-    blank_nvs = REPO_ROOT / "target/firmware/nvs_blank.bin"
-    blank_nvs.write_bytes(b"\xff" * _NVS_SIZE)
-    log(f"device-setup: wiping nvs @ {_NVS_OFFSET}")
-    client.esp32.flash(str(blank_nvs), target=_NVS_OFFSET)
-
-    log(f"device-setup: flashing {APP_BIN.name} @ 0x20000 ({APP_BIN.stat().st_size:,} B)")
-    client.esp32.flash(str(APP_BIN), target="0x20000")
 
     log("device-setup: attaching console, resetting, waiting for sta ip…")
     with PexpectAdapter(client=client.serial) as console:
@@ -262,14 +218,17 @@ def real_target_url(jumpstarter_client, term) -> str | None:
     """Resolve where the test session should run:
 
     1. `WC_TEST_TARGET_URL` — point at an already-running device.
-    2. `JUMPSTARTER_HOST` — flash + boot + detect IP (done once).
+    2. `JUMPSTARTER_HOST` — reset the (already-flashed) board and
+       detect the IP from boot serial. Flashing is done up front by
+       the `device-test` make target — pytest doesn't reflash on
+       every session.
     3. neither — return None and let `host_url` spawn the host binary.
     """
     if env_url := os.environ.get("WC_TEST_TARGET_URL"):
         term(f"target: using WC_TEST_TARGET_URL={env_url}")
         return env_url.rstrip("/")
     if jumpstarter_client is not None:
-        ip = _flash_and_detect_ip(jumpstarter_client, term)
+        ip = _reset_and_detect_ip(jumpstarter_client, term)
         return f"http://{ip}"
     term("target: no device — falling back to local host binary")
     return None
