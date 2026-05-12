@@ -291,15 +291,35 @@ fn main() -> Result<()> {
     let reset_reason_str = reset_reason_label(reset_reason);
     info!("reset reason: {reset_reason_str}");
 
-    // Self-test passed: HTTPD is up + tasks spawned. Cancel any pending
-    // OTA rollback so the bootloader keeps booting this slot.
-    net_ota::mark_app_valid();
+    // Rollback safety: defer marking the running slot valid until we've
+    // proven we can actually run. If the firmware panics or wedges before
+    // this fires, the bootloader will roll back on the next reboot.
+    // Criteria: uptime >= 60s + WiFi reached Connected once + heap above
+    // floor. mark_app_valid is idempotent.
+    let mut app_marked_valid = false;
+    const HEALTHY_UPTIME_MS: u64 = 60_000;
+    const HEAP_FLOOR_BYTES: u32 = 20 * 1024;
 
     loop {
         std::thread::sleep(Duration::from_secs(10));
         let uptime_ms = clock.monotonic_ms().saturating_sub(started);
         let free_heap = unsafe { esp_idf_svc::sys::esp_get_free_heap_size() };
         let min_free_heap = unsafe { esp_idf_svc::sys::esp_get_minimum_free_heap_size() };
+
+        if !app_marked_valid && uptime_ms >= HEALTHY_UPTIME_MS && min_free_heap >= HEAP_FLOOR_BYTES {
+            let wifi_ok = matches!(
+                wifi.state(),
+                watercontroller_core::traits::WifiState::Connected { .. }
+            );
+            if wifi_ok {
+                let up_s = uptime_ms / 1000;
+                info!("ota: healthy runtime, marking slot valid");
+                info!("  uptime    : {up_s}s");
+                info!("  min heap  : {min_free_heap}B");
+                net_ota::mark_app_valid();
+                app_marked_valid = true;
+            }
+        }
         app.update_state(|s| {
             s.uptime_ms = uptime_ms;
             if s.firmware_version.is_empty() {
