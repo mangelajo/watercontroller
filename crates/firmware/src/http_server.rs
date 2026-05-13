@@ -427,6 +427,17 @@ fn register_handlers(
             cfg.flow_alarm = new;
         },
     )?;
+    register_section(
+        server,
+        "/api/config/webhooks",
+        app.clone(), app.clone(), nvs.clone(),
+        |cfg| cfg.webhooks.clone(),
+        |cfg, mut new: Vec<watercontroller_core::webhook::WebhookConfig>| {
+            // Enforce the cap on save so a corrupt POST can't bloat NVS.
+            new.truncate(watercontroller_core::webhook::WEBHOOKS_MAX);
+            cfg.webhooks = new;
+        },
+    )?;
 
     {
         let app = app.clone();
@@ -673,6 +684,51 @@ fn register_handlers(
                 .unwrap_or_default();
             let mut resp = req.into_response(200, None, JSON_CT)?;
             resp.write_all(&body)?;
+            Ok(())
+        })?;
+    }
+
+    // POST /api/webhooks/test → emit a synthetic event of the
+    // requested kind. Body: {"kind":"flow_alarm.fire","vars":{...}}.
+    // Auth-gated since it can trigger outbound HTTP to user URLs.
+    {
+        let app = app.clone();
+        server.fn_handler::<EspIOError, _>(routes::WEBHOOKS_TEST, Method::Post, move |mut req| {
+            if require_auth(&req, &app).is_err() {
+                return write_unauthorized(req);
+            }
+            let mut buf = Vec::with_capacity(256);
+            let mut chunk = [0u8; READ_BUF_LEN];
+            loop {
+                let n = req.read(&mut chunk)?;
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.len() > MAX_BODY {
+                    break;
+                }
+            }
+            #[derive(serde::Deserialize)]
+            struct TestReq {
+                kind: watercontroller_core::webhook::EventKind,
+                #[serde(default)]
+                vars: std::collections::BTreeMap<String, String>,
+            }
+            match serde_json::from_slice::<TestReq>(&buf) {
+                Ok(tr) => {
+                    let mut ev = watercontroller_core::webhook::WebhookEvent::new(tr.kind);
+                    ev.vars = tr.vars;
+                    app.emit_event(ev);
+                    let _ = req.into_response(202, None, &[])?;
+                }
+                Err(e) => {
+                    let body = serde_json::to_vec(&ApiError::new(format!("invalid: {e}")))
+                        .unwrap_or_default();
+                    let mut resp = req.into_response(400, None, JSON_CT)?;
+                    resp.write_all(&body)?;
+                }
+            }
             Ok(())
         })?;
     }

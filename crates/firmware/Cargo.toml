@@ -19,6 +19,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 esp-idf-svc = { version = "0.51", default-features = false }
 esp-idf-hal = { version = "0.45", default-features = false }
+# embedded-svc is pulled in transitively by esp-idf-svc; we depend on
+# it directly so the webhook dispatcher can name the http::client
+# traits (Connection, Write). Version matches what esp-idf-svc 0.51
+# already resolves so we don't fork the graph.
+embedded-svc = { version = "0.28", default-features = false, features = ["std"] }
 chrono = { version = "0.4", default-features = false, features = ["alloc", "std", "serde"] }
 anyhow = "1"
 heapless = "0.8"

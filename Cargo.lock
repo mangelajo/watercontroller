@@ -2724,6 +2724,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "embedded-svc",
  "embuild",
  "esp-idf-hal",
  "esp-idf-svc",
@@ -2747,6 +2748,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower-http",
+ "ureq",
  "watercontroller-core",
 ]
 

@@ -191,6 +191,14 @@ fn dispatch(cmd: &str, app: &App, nvs: &Arc<dyn NvsStore>, wifi: &Arc<dyn Wifi>)
             }
             _ => println!(">> usage: alarm <status|clear>"),
         },
+        Some("webhook") => match it.next() {
+            Some("list") => print_webhook_list(app),
+            Some("fire") => match it.next() {
+                Some(kind_str) => fire_webhook(app, kind_str),
+                None => println!(">> usage: webhook fire <event_kind>"),
+            },
+            _ => println!(">> usage: webhook <list|fire <event_kind>>"),
+        },
         Some("ap-info") => {
             let cfg = app.config();
             println!(">> ap_ssid: {} (password set: {})", cfg.wifi.ap_ssid, !cfg.wifi.ap_password.is_empty());
@@ -231,6 +239,8 @@ fn print_help() {
 >>   mem                         heap stats (free/allocated/largest/min-ever)\n\
 >>   alarm status                show flow alarm config + latched state\n\
 >>   alarm clear                 reset the latched flow alarm\n\
+>>   webhook list                show configured webhooks\n\
+>>   webhook fire <event>        emit a webhook event (e.g. flow_alarm.fire)\n\
 >>   reset                       reboot\n\
 >>   factory_reset               wipe NVS config + reboot";
     println!("{help}");
@@ -284,6 +294,49 @@ fn list_networks(app: &App) {
 /// after the line printed — likely a stack-overflow corruption that
 /// surfaced one tick later in the wifi-probe path).
 #[inline(never)]
+#[inline(never)]
+fn print_webhook_list(app: &App) {
+    let cfg = app.config();
+    if cfg.webhooks.is_empty() {
+        println!(">> no webhooks configured");
+        return;
+    }
+    for (i, wh) in cfg.webhooks.iter().enumerate() {
+        let on = if wh.enabled { "on" } else { "off" };
+        let kind = match wh.kind {
+            watercontroller_core::webhook::WebhookKind::Generic => "generic",
+            watercontroller_core::webhook::WebhookKind::Slack => "slack",
+            watercontroller_core::webhook::WebhookKind::Discord => "discord",
+            watercontroller_core::webhook::WebhookKind::HomeAssistant => "ha",
+        };
+        let n_events = wh.events.len();
+        println!(">> [{i}] {on} kind={kind} events={n_events}");
+        let url = wh.url.as_str();
+        println!(">>     url: {url}");
+    }
+}
+
+#[inline(never)]
+fn fire_webhook(app: &App, kind_str: &str) {
+    // Reuse serde to parse the dotted form. Accept input both quoted
+    // and unquoted by stuffing quotes around the bare token.
+    let quoted = format!("\"{kind_str}\"");
+    match serde_json::from_str::<watercontroller_core::webhook::EventKind>(&quoted) {
+        Ok(kind) => {
+            app.emit_event(watercontroller_core::webhook::WebhookEvent::new(kind));
+            println!(">> webhook event {kind_str} emitted");
+        }
+        Err(_) => {
+            println!(">> unknown event kind: {kind_str}");
+            println!(">> known kinds:");
+            for k in watercontroller_core::webhook::EventKind::all() {
+                let s = k.as_str();
+                println!(">>   {s}");
+            }
+        }
+    }
+}
+
 fn print_alarm_status(app: &App) {
     let cfg = app.config();
     let snap = app.snapshot();

@@ -4,6 +4,7 @@
 
 mod fakes;
 mod http;
+mod webhook_dispatch;
 
 use crate::fakes::WallClock;
 use std::sync::Arc;
@@ -21,6 +22,10 @@ async fn main() {
 
     let clock: Arc<dyn watercontroller_core::traits::Clock> = Arc::new(WallClock::new());
     let app = App::new(clock.clone(), Config::default());
+    let webhook_dispatcher = Arc::new(
+        crate::webhook_dispatch::HostWebhookDispatcher::spawn(app.clone()),
+    );
+    app.set_webhook_dispatcher(webhook_dispatcher);
 
     // Bridge the std::sync::mpsc log subscription onto a tokio broadcast so
     // the axum WS handler can subscribe per-connection.

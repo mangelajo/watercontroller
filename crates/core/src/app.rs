@@ -57,8 +57,11 @@ struct AppInner {
     /// it survives reboot (last 16, ~1 KiB blob).
     alarm_history: Mutex<VecDeque<AlarmEvent>>,
     /// Outbound webhook dispatcher. Defaults to `NoopDispatcher`; the
-    /// firmware injects a real one (HTTP-backed) post-boot.
-    webhooks: Arc<dyn WebhookDispatcher>,
+    /// firmware swaps in a real (HTTP-backed) one post-boot via
+    /// `set_webhook_dispatcher`. Behind a Mutex so the swap doesn't
+    /// need Arc::get_mut (the dispatcher task already holds a clone
+    /// of the App by the time we wire it in).
+    webhooks: Mutex<Arc<dyn WebhookDispatcher>>,
 }
 
 impl App {
@@ -121,42 +124,18 @@ impl App {
                 last_persisted_valve: Mutex::new(restored_state),
                 flow_alarm_last_check_ms: Mutex::new(None),
                 alarm_history: Mutex::new(history),
-                webhooks: Arc::new(NoopDispatcher::default()),
+                webhooks: Mutex::new(Arc::new(NoopDispatcher::default())),
             }),
         }
     }
 
-    /// Replace the webhook dispatcher. Called once at boot by the
-    /// firmware after the HTTP-backed dispatcher's task has spawned.
-    /// Tests use this to inject `RecordingDispatcher`.
-    ///
-    /// Re-allocates `AppInner` so the field can stay non-Mutex on the
-    /// hot path (dispatch happens from `tick()`). Only safe to call
-    /// before any other thread is using this App handle.
-    pub fn set_webhook_dispatcher(&mut self, dispatcher: Arc<dyn WebhookDispatcher>) {
-        // We're the only Arc-holder right after construction, so we
-        // can unwrap-or-replace cleanly. If anyone else holds the
-        // App, this would deep-clone — acceptable but worth knowing.
-        if let Some(inner_mut) = Arc::get_mut(&mut self.inner) {
-            inner_mut.webhooks = dispatcher;
-        } else {
-            let new_inner = AppInner {
-                clock: self.inner.clock.clone(),
-                state: DeviceState::new(),
-                config: Mutex::new(self.inner.config.lock().unwrap().clone()),
-                valve: Mutex::new(WaterValve::with_timing(
-                    self.inner.config.lock().unwrap().switches.valve_timing,
-                )),
-                sprinkler1: Mutex::new(TimedSwitch::new(None)),
-                sprinkler2: Mutex::new(TimedSwitch::new(None)),
-                nvs: self.inner.nvs.clone(),
-                last_persisted_valve: Mutex::new(None),
-                flow_alarm_last_check_ms: Mutex::new(None),
-                alarm_history: Mutex::new(VecDeque::new()),
-                webhooks: dispatcher,
-            };
-            self.inner = Arc::new(new_inner);
-        }
+    /// Swap in a real webhook dispatcher (the firmware does this once
+    /// at boot after its HTTP-backed dispatcher's task has spawned).
+    /// Idempotent and safe to call at any time — the existing
+    /// dispatcher is replaced atomically and dropped at the end of
+    /// the call.
+    pub fn set_webhook_dispatcher(&self, dispatcher: Arc<dyn WebhookDispatcher>) {
+        *self.inner.webhooks.lock().unwrap() = dispatcher;
     }
 
     /// Emit a webhook event. Non-blocking (the dispatcher implementation
@@ -187,7 +166,12 @@ impl App {
         if let Entry::Vacant(e) = ev.vars.entry("uptime_s".into()) {
             e.insert(uptime_s.to_string());
         }
-        self.inner.webhooks.dispatch(ev);
+        // Clone the Arc inside the lock so the dispatch call runs
+        // without holding the Mutex (dispatch() should be cheap — the
+        // firmware impl is just a try_send — but we don't want to
+        // serialize all dispatch calls behind one mutex).
+        let dispatcher = self.inner.webhooks.lock().unwrap().clone();
+        dispatcher.dispatch(ev);
     }
 
     /// Snapshot of past alarm fires (oldest first). Bounded at
@@ -670,7 +654,7 @@ mod tests {
         use crate::webhook::{EventKind, RecordingDispatcher};
         let recorder = Arc::new(RecordingDispatcher::default());
         let clock = Arc::new(TestClock::new());
-        let mut app = App::new(clock.clone(), Config::default());
+        let app = App::new(clock.clone(), Config::default());
         app.set_webhook_dispatcher(recorder.clone());
         // replace_config above just emitted ConfigChanged — drain.
         let _ = recorder.take();
@@ -702,7 +686,7 @@ mod tests {
         use crate::webhook::{EventKind, RecordingDispatcher};
         let recorder = Arc::new(RecordingDispatcher::default());
         let clock = Arc::new(TestClock::new());
-        let mut app = App::new(clock, Config::default());
+        let app = App::new(clock, Config::default());
         app.set_webhook_dispatcher(recorder.clone());
         let _ = recorder.take();
         let cfg = (*app.config()).clone();

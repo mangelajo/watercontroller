@@ -65,6 +65,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/wifi/reconnect", post(post_wifi_reconnect))
         .route(routes::ALARM_CLEAR, post(post_alarm_clear))
         .route(routes::ALARM_HISTORY, get(get_alarm_history))
+        .route("/api/config/webhooks", get(get_webhooks).put(put_webhooks))
+        .route(routes::WEBHOOKS_TEST, post(post_webhooks_test))
         .with_state(Arc::new(state))
 }
 
@@ -103,6 +105,36 @@ async fn post_alarm_clear(State(s): State<Arc<AppState>>) -> impl IntoResponse {
 
 async fn get_alarm_history(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     Json(serde_json::json!({ "events": s.app.alarm_history() }))
+}
+
+async fn get_webhooks(State(s): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(s.app.config().webhooks.clone())
+}
+async fn put_webhooks(
+    State(s): State<Arc<AppState>>,
+    Json(mut new): Json<Vec<watercontroller_core::webhook::WebhookConfig>>,
+) -> impl IntoResponse {
+    new.truncate(watercontroller_core::webhook::WEBHOOKS_MAX);
+    let mut cfg = (*s.app.config()).clone();
+    cfg.webhooks = new;
+    s.app.replace_config_section(cfg, "webhooks");
+    StatusCode::NO_CONTENT
+}
+
+#[derive(serde::Deserialize)]
+struct WebhookTestReq {
+    kind: watercontroller_core::webhook::EventKind,
+    #[serde(default)]
+    vars: std::collections::BTreeMap<String, String>,
+}
+async fn post_webhooks_test(
+    State(s): State<Arc<AppState>>,
+    Json(tr): Json<WebhookTestReq>,
+) -> impl IntoResponse {
+    let mut ev = watercontroller_core::webhook::WebhookEvent::new(tr.kind);
+    ev.vars = tr.vars;
+    s.app.emit_event(ev);
+    StatusCode::ACCEPTED
 }
 
 async fn post_factory_reset() -> impl IntoResponse {

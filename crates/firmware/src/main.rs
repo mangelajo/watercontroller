@@ -19,6 +19,7 @@ mod qemu_eth;
 mod task_util;
 mod tee_log;
 mod tls_certgen;
+mod webhook_dispatch;
 
 use anyhow::Result;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
@@ -175,6 +176,13 @@ fn main() -> Result<()> {
 
     let clock: Arc<dyn Clock> = Arc::new(EspClock);
     let app = App::with_nvs(clock.clone(), config.clone(), Some(nvs_store.clone()));
+    // Spawn the HTTP-backed webhook dispatcher task and swap it into
+    // the App. set_webhook_dispatcher uses an internal Mutex so this
+    // is safe to call after the App is shared.
+    let webhook_dispatcher = std::sync::Arc::new(
+        crate::webhook_dispatch::EspWebhookDispatcher::spawn(app.clone()),
+    );
+    app.set_webhook_dispatcher(webhook_dispatcher);
     if let Some(state) = app.restored_valve_state() {
         info!(
             "boot: restored composite water control state = {}",
@@ -297,6 +305,7 @@ fn main() -> Result<()> {
     // Criteria: uptime >= 60s + WiFi reached Connected once + heap above
     // floor. mark_app_valid is idempotent.
     let mut app_marked_valid = false;
+    let mut boot_event_emitted = false;
     const HEALTHY_UPTIME_MS: u64 = 60_000;
     const HEAP_FLOOR_BYTES: u32 = 20 * 1024;
 
@@ -306,11 +315,40 @@ fn main() -> Result<()> {
         let free_heap = unsafe { esp_idf_svc::sys::esp_get_free_heap_size() };
         let min_free_heap = unsafe { esp_idf_svc::sys::esp_get_minimum_free_heap_size() };
 
-        if !app_marked_valid && uptime_ms >= HEALTHY_UPTIME_MS && min_free_heap >= HEAP_FLOOR_BYTES {
-            let wifi_ok = matches!(
-                wifi.state(),
-                watercontroller_core::traits::WifiState::Connected { .. }
+        let wifi_ok = matches!(
+            wifi.state(),
+            watercontroller_core::traits::WifiState::Connected { .. }
+        );
+
+        // Emit the boot / panic_boot webhook event once, after WiFi is
+        // up — otherwise the dispatcher's HTTP POST would fail and we'd
+        // miss the very signal worth notifying on. PANIC reset reasons
+        // (panic, task_wdt, int_wdt, brownout) all map to panic_boot.
+        if !boot_event_emitted && wifi_ok {
+            use esp_idf_svc::sys::*;
+            #[allow(non_upper_case_globals)]
+            let is_panic = matches!(
+                reset_reason,
+                esp_reset_reason_t_ESP_RST_PANIC
+                    | esp_reset_reason_t_ESP_RST_INT_WDT
+                    | esp_reset_reason_t_ESP_RST_TASK_WDT
+                    | esp_reset_reason_t_ESP_RST_WDT
+                    | esp_reset_reason_t_ESP_RST_BROWNOUT
             );
+            let kind = if is_panic {
+                watercontroller_core::webhook::EventKind::PanicBoot
+            } else {
+                watercontroller_core::webhook::EventKind::Boot
+            };
+            app.emit_event(
+                watercontroller_core::webhook::WebhookEvent::new(kind)
+                    .with("reset_reason", reset_reason_str.to_string())
+                    .with("firmware_version", watercontroller_core::version().to_string()),
+            );
+            boot_event_emitted = true;
+        }
+
+        if !app_marked_valid && uptime_ms >= HEALTHY_UPTIME_MS && min_free_heap >= HEAP_FLOOR_BYTES {
             if wifi_ok {
                 let up_s = uptime_ms / 1000;
                 info!("ota: healthy runtime, marking slot valid");
@@ -318,6 +356,9 @@ fn main() -> Result<()> {
                 info!("  min heap  : {min_free_heap}B");
                 net_ota::mark_app_valid();
                 app_marked_valid = true;
+                app.emit_event(watercontroller_core::webhook::WebhookEvent::new(
+                    watercontroller_core::webhook::EventKind::OtaCompleted,
+                ).with("firmware_version", watercontroller_core::version().to_string()));
             }
         }
         app.update_state(|s| {

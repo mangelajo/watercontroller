@@ -67,6 +67,10 @@ pub mod routes {
     pub const ALARM_CLEAR: &str = "/api/alarm/clear";
     /// GET: list past flow-alarm fires (oldest first), persisted in NVS.
     pub const ALARM_HISTORY: &str = "/api/alarm/history";
+    /// POST: emit a synthetic webhook event for testing the wiring,
+    /// e.g. `{"kind":"flow_alarm.fire"}`. Goes through the normal
+    /// dispatcher path so it exercises every subscribed webhook.
+    pub const WEBHOOKS_TEST: &str = "/api/webhooks/test";
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

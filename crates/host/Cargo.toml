@@ -22,3 +22,8 @@ parking_lot = "0.12"
 axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["fs", "trace"] }
+
+# Blocking HTTP client used by the host webhook dispatcher. ureq is
+# tiny vs reqwest and we only need synchronous POST/PUT from a single
+# worker thread — same pattern as the firmware-side dispatcher.
+ureq = { version = "2", default-features = false }
