@@ -431,7 +431,18 @@ fn spawn_mqtt_supervisor(app: App, mqtt: Arc<EspMqtt>, wifi: Arc<WifiSupervisor>
     // initial broker connect is hungry. 12 KiB leaves ~4 KiB margin.
     task_util::spawn_named(c"mqtt-sup", 12 * 1024, move || {
             use watercontroller_core::traits::WifiState;
+            // Exponential backoff on failed connects. The IDF MQTT
+            // client's auth-refused failure surfaces as a Disconnected
+            // event *after* connect() returns Ok — from our vantage
+            // it just looks like the client never reaches connected.
+            // Without backoff we'd hammer the broker every 10s and
+            // recreate the client each time, eventually exhausting the
+            // IDF event-loop pool (see the two panics in serial-logs
+            // /serial-current.log from the earlier run).
+            const BACKOFF_INITIAL_MS: u64 = 5_000;
+            const BACKOFF_MAX_MS: u64 = 300_000; // 5 min cap
             let mut last_attempt: u64 = 0;
+            let mut backoff_ms: u64 = BACKOFF_INITIAL_MS;
             loop {
                 std::thread::sleep(Duration::from_secs(5));
                 let cfg = app.config();
@@ -442,8 +453,8 @@ fn spawn_mqtt_supervisor(app: App, mqtt: Arc<EspMqtt>, wifi: Arc<WifiSupervisor>
 
                 if !mqtt.is_connected() {
                     let now = unsafe { esp_idf_svc::sys::esp_timer_get_time() } as u64 / 1000;
-                    if now.saturating_sub(last_attempt) < 10_000 {
-                        continue; // back off
+                    if now.saturating_sub(last_attempt) < backoff_ms {
+                        continue;
                     }
                     last_attempt = now;
                     log::info!("mqtt: connecting to {}", cfg.mqtt.broker_url);
@@ -457,11 +468,25 @@ fn spawn_mqtt_supervisor(app: App, mqtt: Arc<EspMqtt>, wifi: Arc<WifiSupervisor>
                         &cfg.mqtt.client_key_pem,
                     ) {
                         log::warn!("mqtt connect failed: {e:?}");
+                        backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
+                        continue;
+                    }
+                    // Give the IDF client a moment to settle. If the
+                    // broker rejects (bad creds), is_connected() stays
+                    // false and we extend backoff below.
+                    std::thread::sleep(Duration::from_secs(3));
+                    if !mqtt.is_connected() {
+                        log::warn!(
+                            "mqtt: broker did not accept connect; backing off {}s",
+                            backoff_ms / 1000
+                        );
+                        backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                         continue;
                     }
                 }
 
                 if mqtt.is_connected() {
+                    backoff_ms = BACKOFF_INITIAL_MS; // reset on success
                     let integ = MqttIntegration {
                         app: app.clone(),
                         mqtt: mqtt.clone() as Arc<dyn Mqtt>,

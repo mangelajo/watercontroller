@@ -46,7 +46,7 @@ pub fn spawn(
     // clear`) still do an explicit `(*app.config()).clone()` to get
     // an owned Config for the mutation, but those run on a flat call
     // chain (no nested format machinery), so they fit comfortably.
-    crate::task_util::spawn_named(c"serial-cli", 10 * 1024, move || {
+    crate::task_util::spawn_named(c"serial-cli", 10 * 1024 + 512, move || {
         run(app, nvs, wifi);
     });
 }

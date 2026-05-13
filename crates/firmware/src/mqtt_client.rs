@@ -72,6 +72,19 @@ impl EspMqtt {
             private_key,
             ..Default::default()
         };
+        // Tear down the previous client BEFORE allocating the new one.
+        // EspMqttClient's Drop releases its event-loop queue + internal
+        // pthread mutexes. If we let the new client overlap the old one
+        // (which the obvious `*self.inner.lock() = Some(new)` does — it
+        // drops only after the new is built), we leak event-loop queues
+        // on every reconnect. Under an auth-refused retry storm that
+        // pool exhausts and esp_event_handler_register_with asserts
+        // `event_loop != NULL`. We also saw a use-after-free crash in
+        // publish() (pthread_mutex_lock on a freed internal NVS mutex)
+        // from the same overlap window.
+        *self.inner.lock().unwrap() = None;
+        *self.connected.lock().unwrap() = false;
+
         let handler = self.handler.clone();
         let connected = self.connected.clone();
         let client = EspMqttClient::new_cb(url, &cfg, move |evt: EspMqttEvent| {
