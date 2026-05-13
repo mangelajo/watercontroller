@@ -10,6 +10,7 @@
 use crate::api::{CommandOutcome, SwitchCommand};
 use crate::config::Config;
 use crate::state::{AlarmEvent, DeviceState, DeviceSnapshot, WaterControlState};
+use crate::webhook::{EventKind, NoopDispatcher, WebhookDispatcher, WebhookEvent};
 use crate::switch::TimedSwitch;
 use crate::traits::{Clock, NvsStore};
 use crate::water_valve::{ValveOutputs, WaterValve};
@@ -55,6 +56,9 @@ struct AppInner {
     /// Most-recent-last ring of past alarm fires. Persisted to NVS so
     /// it survives reboot (last 16, ~1 KiB blob).
     alarm_history: Mutex<VecDeque<AlarmEvent>>,
+    /// Outbound webhook dispatcher. Defaults to `NoopDispatcher`; the
+    /// firmware injects a real one (HTTP-backed) post-boot.
+    webhooks: Arc<dyn WebhookDispatcher>,
 }
 
 impl App {
@@ -117,8 +121,73 @@ impl App {
                 last_persisted_valve: Mutex::new(restored_state),
                 flow_alarm_last_check_ms: Mutex::new(None),
                 alarm_history: Mutex::new(history),
+                webhooks: Arc::new(NoopDispatcher::default()),
             }),
         }
+    }
+
+    /// Replace the webhook dispatcher. Called once at boot by the
+    /// firmware after the HTTP-backed dispatcher's task has spawned.
+    /// Tests use this to inject `RecordingDispatcher`.
+    ///
+    /// Re-allocates `AppInner` so the field can stay non-Mutex on the
+    /// hot path (dispatch happens from `tick()`). Only safe to call
+    /// before any other thread is using this App handle.
+    pub fn set_webhook_dispatcher(&mut self, dispatcher: Arc<dyn WebhookDispatcher>) {
+        // We're the only Arc-holder right after construction, so we
+        // can unwrap-or-replace cleanly. If anyone else holds the
+        // App, this would deep-clone — acceptable but worth knowing.
+        if let Some(inner_mut) = Arc::get_mut(&mut self.inner) {
+            inner_mut.webhooks = dispatcher;
+        } else {
+            let new_inner = AppInner {
+                clock: self.inner.clock.clone(),
+                state: DeviceState::new(),
+                config: Mutex::new(self.inner.config.lock().unwrap().clone()),
+                valve: Mutex::new(WaterValve::with_timing(
+                    self.inner.config.lock().unwrap().switches.valve_timing,
+                )),
+                sprinkler1: Mutex::new(TimedSwitch::new(None)),
+                sprinkler2: Mutex::new(TimedSwitch::new(None)),
+                nvs: self.inner.nvs.clone(),
+                last_persisted_valve: Mutex::new(None),
+                flow_alarm_last_check_ms: Mutex::new(None),
+                alarm_history: Mutex::new(VecDeque::new()),
+                webhooks: dispatcher,
+            };
+            self.inner = Arc::new(new_inner);
+        }
+    }
+
+    /// Emit a webhook event. Non-blocking (the dispatcher implementation
+    /// queues internally). Fills in the standard variables — `event`,
+    /// `event_label`, `iso_ts`, `device`, `uptime_s` — if the caller
+    /// hasn't already set them.
+    pub fn emit_event(&self, mut ev: WebhookEvent) {
+        use std::collections::btree_map::Entry;
+        let cfg = self.config();
+        let now = self.inner.clock.now();
+        let uptime_s = self.inner.clock.monotonic_ms() / 1000;
+        let kind_str = ev.kind.as_str();
+        let label = ev.kind.label();
+        let device = cfg.wifi.hostname.clone();
+        // Only insert if absent — callers can override e.g. `device`.
+        if let Entry::Vacant(e) = ev.vars.entry("event".into()) {
+            e.insert(kind_str.into());
+        }
+        if let Entry::Vacant(e) = ev.vars.entry("event_label".into()) {
+            e.insert(label.into());
+        }
+        if let Entry::Vacant(e) = ev.vars.entry("iso_ts".into()) {
+            e.insert(now.to_rfc3339());
+        }
+        if let Entry::Vacant(e) = ev.vars.entry("device".into()) {
+            e.insert(device);
+        }
+        if let Entry::Vacant(e) = ev.vars.entry("uptime_s".into()) {
+            e.insert(uptime_s.to_string());
+        }
+        self.inner.webhooks.dispatch(ev);
     }
 
     /// Snapshot of past alarm fires (oldest first). Bounded at
@@ -175,6 +244,14 @@ impl App {
     /// running components. Currently: sprinkler auto-off durations on the
     /// `TimedSwitch`es. Persistence to NVS is the caller's responsibility.
     pub fn replace_config(&self, cfg: Config) {
+        self.replace_config_section(cfg, "all");
+    }
+
+    /// Same as `replace_config` but lets the caller name the section
+    /// that changed — surfaces as the `section` variable on the emitted
+    /// `config.changed` event. HTTP per-section PUT handlers pass
+    /// their section name (`wifi`, `mqtt`, `flow_alarm`, `webhooks`, …).
+    pub fn replace_config_section(&self, cfg: Config, section: &str) {
         let auto_off_or_none = |secs: u32| {
             if secs == 0 {
                 None
@@ -188,6 +265,9 @@ impl App {
             .set_auto_off(auto_off_or_none(cfg.switches.sprinkler_2_auto_off_secs));
         self.inner.valve.lock().unwrap().set_timing(cfg.switches.valve_timing);
         *self.inner.config.lock().unwrap() = Arc::new(cfg);
+        self.emit_event(
+            WebhookEvent::new(EventKind::ConfigChanged).with("section", section.to_string()),
+        );
     }
 
     /// Fire a scheduled sprinkler activation with an optional per-run
@@ -395,6 +475,12 @@ impl App {
                 flow_lph: flow,
                 duration_secs: duration,
             });
+            self.emit_event(
+                WebhookEvent::new(EventKind::FlowAlarmFire)
+                    .with("flow_lph", format!("{flow:.1}"))
+                    .with("threshold_lph", format!("{threshold:.1}"))
+                    .with("duration_secs", duration.to_string()),
+            );
             let _ = self.switch_command(SwitchCommand::WaterControl { on: false });
         } else if was_active
             && matches!(snap.switches.water_control, WaterControlState::On)
@@ -413,6 +499,7 @@ impl App {
         });
         if was_active {
             log::info!("flow alarm cleared");
+            self.emit_event(WebhookEvent::new(EventKind::FlowAlarmClear));
         }
     }
 }
@@ -576,6 +663,54 @@ mod tests {
         clock.advance(1_000);
         app.tick();
         assert_eq!(app.snapshot().alarm.elapsed_secs, 0);
+    }
+
+    #[test]
+    fn flow_alarm_emits_webhook_events_on_fire_and_clear() {
+        use crate::webhook::{EventKind, RecordingDispatcher};
+        let recorder = Arc::new(RecordingDispatcher::default());
+        let clock = Arc::new(TestClock::new());
+        let mut app = App::new(clock.clone(), Config::default());
+        app.set_webhook_dispatcher(recorder.clone());
+        // replace_config above just emitted ConfigChanged — drain.
+        let _ = recorder.take();
+        arm_alarm(&app, 50.0, 5);
+        let _ = recorder.take(); // arm_alarm calls replace_config too
+        set_flow(&app, 100.0);
+        app.tick();
+        clock.advance(6_000);
+        app.tick();
+        let fired = recorder.take();
+        assert!(
+            fired.iter().any(|e| e.kind == EventKind::FlowAlarmFire),
+            "expected flow_alarm.fire, got {fired:?}"
+        );
+        let fire = fired.iter().find(|e| e.kind == EventKind::FlowAlarmFire).unwrap();
+        assert_eq!(fire.vars.get("threshold_lph").unwrap(), "50.0");
+        assert_eq!(fire.vars.get("duration_secs").unwrap(), "5");
+
+        app.clear_flow_alarm();
+        let cleared = recorder.take();
+        assert!(
+            cleared.iter().any(|e| e.kind == EventKind::FlowAlarmClear),
+            "expected flow_alarm.clear, got {cleared:?}"
+        );
+    }
+
+    #[test]
+    fn replace_config_emits_config_changed() {
+        use crate::webhook::{EventKind, RecordingDispatcher};
+        let recorder = Arc::new(RecordingDispatcher::default());
+        let clock = Arc::new(TestClock::new());
+        let mut app = App::new(clock, Config::default());
+        app.set_webhook_dispatcher(recorder.clone());
+        let _ = recorder.take();
+        let cfg = (*app.config()).clone();
+        app.replace_config_section(cfg, "mqtt");
+        let evs = recorder.take();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, EventKind::ConfigChanged);
+        assert_eq!(evs[0].vars.get("section").unwrap(), "mqtt");
     }
 
     #[test]

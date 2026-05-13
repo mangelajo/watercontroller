@@ -16,6 +16,7 @@ pub mod state;
 pub mod switch;
 pub mod traits;
 pub mod water_valve;
+pub mod webhook;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

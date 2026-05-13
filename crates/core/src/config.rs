@@ -237,6 +237,10 @@ pub struct Config {
     /// before exposing the device to anything wider.
     #[serde(default)]
     pub admin_token: String,
+    /// Outbound webhooks. See `crate::webhook` for the per-entry shape
+    /// and the catalog of events. Capped at `webhook::WEBHOOKS_MAX`.
+    #[serde(default)]
+    pub webhooks: Vec<crate::webhook::WebhookConfig>,
 }
 
 fn default_timezone() -> String {
@@ -264,6 +268,7 @@ impl Default for Config {
             schedule: default_schedule(),
             wireguard: WireguardConfig::default(),
             admin_token: String::new(),
+            webhooks: Vec::new(),
         }
     }
 }
