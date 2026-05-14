@@ -24,7 +24,13 @@ pub fn spawn(port: u16) {
         for stream in listener.incoming() {
             match stream {
                 Ok(s) => {
-                    spawn_named(c"telnet-conn", 6 * 1024, move || handle_client(s));
+                    // 4 KiB stack: handle_client peaks ~1.5 KiB (one
+                    // `writeln!` placeholder via core::fmt). Requesting
+                    // 6 KiB used to fail with ENOMEM once internal
+                    // DRAM fragmented under load — observed: TCP
+                    // accept succeeds, spawn fails, stream drops,
+                    // client sees "connection closed".
+                    spawn_named(c"telnet-conn", 4 * 1024, move || handle_client(s));
                 }
                 Err(e) => log::warn!("telnet accept: {e}"),
             }

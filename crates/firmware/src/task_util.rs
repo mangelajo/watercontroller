@@ -33,18 +33,13 @@ where
     }
     let display_name = name.to_string_lossy().into_owned();
     let probe_name = display_name.clone();
-    let h = std::thread::Builder::new()
+    let result = std::thread::Builder::new()
         .name(display_name)
         // CRUCIAL: pass stack_size through std::thread::Builder too,
         // not just esp_pthread_set_cfg. Rust's std calls
         // pthread_attr_setstacksize internally with its own default
         // (~10 KiB on this target) AFTER our esp_pthread_set_cfg,
-        // silently clobbering the size we wanted. Tasks created via
-        // spawn_named were getting ~10 KiB regardless of the cfg.
-        // The bug was invisible because `cfg.thread_name` does
-        // survive (different attr), and HWM is reported in words —
-        // so a task with 912 B free was logged as "228 free" and
-        // looked benign.
+        // silently clobbering the size we wanted.
         .stack_size(stack_size)
         .spawn(move || {
             // One-shot stack-size probe at task entry. On ESP-IDF
@@ -60,8 +55,14 @@ where
                 "task {probe_name}: configured={stack_size}B, initial HWM free={initial_free_bytes}B"
             );
             f()
-        })
-        .ok();
+        });
+    let h = match result {
+        Ok(h) => Some(h),
+        Err(e) => {
+            log::error!("spawn_named {name:?} (stack={stack_size}) failed: {e}");
+            None
+        }
+    };
     // Restore default cfg so subsequent pthread_creates from this thread
     // (e.g. IDF subsystems lazily spinning up worker pthreads) don't inherit
     // our custom name+stack — that's how we ended up with three tasks
