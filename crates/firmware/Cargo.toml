@@ -32,7 +32,7 @@ heapless = "0.8"
 embuild = { version = "0.33", features = ["espidf"] }
 
 [features]
-default = ["std", "esp-idf-svc/native"]
+default = ["std", "esp-idf-svc/native", "serial-cli"]
 pio = ["esp-idf-svc/pio"]
 std = ["esp-idf-svc/binstart", "esp-idf-svc/std"]
 alloc = ["esp-idf-svc/alloc"]
@@ -42,6 +42,14 @@ experimental = ["esp-idf-svc/experimental"]
 # WiFi peripheral well enough for `EspWifi::new`) so HTTPD + tasks can come
 # up via the open_eth NIC. Use as: `scripts/qemu.sh` (set automatically).
 qemu = []
+# Interactive serial console (`help`, `wifi list`, `tasks`, `webhook fire`,
+# …). Carries a 20 KiB-stack pthread per session and adds ~7 KiB of code.
+# Enabled by default for lab / debugging builds running on PSRAM-equipped
+# modules; for production builds on no-PSRAM hardware, disable with:
+#   cargo build --release --no-default-features --features "std,esp-idf-svc/native"
+# All `println!` output (boot banner, alive ticks, panic backtraces) is
+# independent of this feature and continues to write to UART regardless.
+serial-cli = []
 
 [package.metadata.esp-idf-sys]
 esp_idf_version = "v5.3.3"

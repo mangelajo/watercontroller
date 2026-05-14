@@ -13,6 +13,7 @@ mod mqtt_client;
 mod net_ota;
 mod net_wg;
 mod net_wifi;
+#[cfg(feature = "serial-cli")]
 mod serial_cli;
 #[cfg(feature = "qemu")]
 mod qemu_eth;
@@ -250,6 +251,7 @@ fn main() -> Result<()> {
     }
 
     log_telnet::spawn(23);
+    #[cfg(feature = "serial-cli")]
     serial_cli::spawn(app.clone(), nvs_store.clone(), wifi.clone());
     let _httpd = http_server::spawn(
         app.clone(),
