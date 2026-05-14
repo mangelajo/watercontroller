@@ -537,8 +537,24 @@ fn try_connect_sta(wifi: &mut BlockingWifi<EspWifi<'static>>, creds: &WifiCreds)
         scan_method: ScanMethod::CompleteScan(esp_idf_svc::wifi::ScanSortMethod::Signal),
         ..Default::default()
     });
+    // If the driver is already started (we're reconnecting after a
+    // probe-detected outage, not booting fresh), don't call start()
+    // again — esp-idf v5.3 panics in pthread_mutex_unlock when
+    // start is called on an already-started driver. EXCVADDR=0x3
+    // null-deref, caught today after the gateway-probe-induced
+    // reconnect cycle. Disconnect first so set_configuration takes
+    // effect, then reconnect on the live driver.
+    let already_started = wifi.is_started().unwrap_or(false);
+    if already_started {
+        // Disconnect is best-effort: if we're already disconnected
+        // (e.g. AP dropped us) this errors with NotStarted-equivalent
+        // — ignore.
+        let _ = wifi.disconnect();
+    }
     wifi.set_configuration(&cfg)?;
-    wifi.start()?;
+    if !already_started {
+        wifi.start()?;
+    }
     wifi.connect()?;
     // Wait for IP. Failure to acquire IP within timeout = treat as failed connect.
     let _ = wait_for_ip(wifi, STA_CONNECT_TIMEOUT_S);
