@@ -59,11 +59,14 @@ CONFIG_MDNS_MAX_INTERFACES=2
 # `--features qemu` builds may not boot. Real hardware works.
 CONFIG_ESP_HTTPS_SERVER_ENABLE=y
 
-# LWIP socket pool. Default is 10. Two HTTPD servers each bring (listening
-# + control + N sessions) sockets — easy to overshoot 10 and start hitting
-# `accept (23)` (ENFILE) errors. 16 leaves headroom for telnet (:23), the
-# WebSocket fanout, and a couple browser tabs without hitting the cap.
-CONFIG_LWIP_MAX_SOCKETS=16
+# LWIP socket pool. Bumped to 24 because the gateway-liveness TCP
+# probe in net_wifi.rs creates a short-lived socket every 30 s; if the
+# AP is half-degraded, the failed connects leave sockets in TIME_WAIT
+# for ~2 × MSL = 2 min. With WS log fanout + 2 httpd servers + telnet
+# + mqtt + the probe + browser preconnects, the previous cap of 16 was
+# tipping over to ENFILE (`accept (23)`) and HTTP stopped accepting.
+# Each socket costs ~200 B of internal DRAM; 24 = ~5 KiB total — fine.
+CONFIG_LWIP_MAX_SOCKETS=24
 
 # HTTPD request header buffer. Default 512 is too tight for a real browser
 # (Chromium sends User-Agent + Accept-* + multiple Sec-* + WS-upgrade easily

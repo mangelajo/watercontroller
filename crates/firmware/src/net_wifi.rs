@@ -276,7 +276,12 @@ fn run_connected(sup: &Arc<WifiSupervisor>, wifi: &mut BlockingWifi<EspWifi<'sta
         }
         thread::sleep(Duration::from_secs(5));
         ticks += 1;
-        if ticks % 6 == 0 && !probe_link(wifi, &mut probe_fails) {
+        // Probe every 12 ticks × 5 s = 60 s. Was 30 s, but each
+        // gateway TCP probe under bad signal leaves a socket in
+        // TIME_WAIT for ~2 min — at 30 s we accumulated up to
+        // 4 lingering sockets per outage, contributing to the
+        // lwIP socket-pool exhaustion (errno 23 / ENFILE) we hit.
+        if ticks % 12 == 0 && !probe_link(wifi, &mut probe_fails) {
             break;
         }
     }
