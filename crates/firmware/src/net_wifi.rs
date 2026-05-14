@@ -15,6 +15,7 @@ use esp_idf_svc::wifi::{
     AccessPointConfiguration, AuthMethod, BlockingWifi, ClientConfiguration, Configuration,
     EspWifi, ScanMethod,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -31,6 +32,14 @@ pub struct WifiSupervisor {
     state: Arc<Mutex<WifiState>>,
     networks: Arc<Mutex<Vec<WifiCreds>>>,
     rescan_signal: Arc<Mutex<bool>>,
+    /// Set by an event-loop callback when WIFI_EVENT_STA_BEACON_TIMEOUT
+    /// fires. The supervisor polls this in `run_connected` to detect
+    /// the "ghost connected" state (STA association cached, data path
+    /// dead) — the IDF driver's auto-recovery doesn't always trigger
+    /// a DISCONNECTED event from a beacon timeout under PS_MIN_MODEM,
+    /// so we handle the BEACON_TIMEOUT event ourselves and force a
+    /// reconnect when it lands. See esp-idf #13491 / #11615.
+    beacon_timeout: Arc<AtomicBool>,
     /// One-shot scan request slot. `scan()` installs a sender here and
     /// signals the supervisor; the supervisor performs the scan on its
     /// own task (it owns the EspWifi) and sends the result back. Bounded
@@ -59,7 +68,28 @@ impl WifiSupervisor {
             scan_request: Arc::new(Mutex::new(None)),
             ap_ssid,
             ap_password,
+            beacon_timeout: Arc::new(AtomicBool::new(false)),
         });
+
+        // Subscribe to WiFi events on the system event loop so we hear
+        // STA_BEACON_TIMEOUT. The callback MUST stay trivial — it runs
+        // on the sys_evt task's stack (~3 KiB total; CLAUDE.md
+        // documents this trap explicitly). One atomic store, no
+        // logging, no formatting.
+        let beacon_for_cb = supervisor.beacon_timeout.clone();
+        // Hold the subscription for the life of the program by
+        // leaking it. The supervisor task already lives forever; no
+        // teardown path exists.
+        match sys_loop.subscribe::<esp_idf_svc::wifi::WifiEvent, _>(move |event| {
+            if matches!(event, esp_idf_svc::wifi::WifiEvent::StaBeaconTimeout) {
+                beacon_for_cb.store(true, Ordering::Release);
+            }
+        }) {
+            Ok(sub) => {
+                std::mem::forget(sub);
+            }
+            Err(e) => log::warn!("wifi: failed to subscribe WifiEvent: {e:?}"),
+        }
 
         let s = supervisor.clone();
         // 12 KiB ran with only 176 B headroom on /api/diag — too close to
@@ -198,29 +228,17 @@ fn announce_connected(
 ) {
     let ip = ip_string(wifi);
     log::info!("wifi: connected ssid={ssid} ip={ip}");
-    // Disable WiFi power-saving (PS_MIN_MODEM is the IDF default).
-    // PS_MIN_MODEM has a well-documented failure mode: under beacon
-    // timeout with certain APs (e.g. Ubiquiti), the driver enters a
-    // "ghost connected" state — STA association is intact and
-    // get_ap_info() keeps returning cached RSSI, but the data path
-    // is dead and our probe_link can't detect it. See esp-idf
-    // issues #11615 and #13491. We're mains-powered; no reason to
-    // pay the reliability tax. Idempotent — safe to call on every
-    // (re)connect.
+    // Leave PS_MIN_MODEM enabled (default; required for battery
+    // operation). Just tighten the beacon-loss window slightly so a
+    // dead AP fires WIFI_EVENT_STA_BEACON_TIMEOUT promptly — our
+    // subscribed callback flips supervisor.beacon_timeout and
+    // run_connected breaks to force a reconnect. This is the battery-
+    // friendly counterpart to esp_wifi_set_ps(NONE): we keep PS on
+    // and *react* to the wedge, instead of preventing it.
     unsafe {
-        let rc = esp_idf_svc::sys::esp_wifi_set_ps(
-            esp_idf_svc::sys::wifi_ps_type_t_WIFI_PS_NONE,
-        );
-        if rc != esp_idf_svc::sys::ESP_OK {
-            log::warn!("wifi: esp_wifi_set_ps(NONE) returned {rc}");
-        } else {
-            log::info!("wifi: power-save disabled (PS_NONE)");
-        }
-        // Tighten beacon-timeout to 10 s (default ~6 s). If we miss
-        // 10 s worth of beacons the driver will probe-then-disconnect
-        // rather than wedging. Trade-off: a noisy AP can drop us
-        // sooner; for us a clean reconnect cycle is preferable to a
-        // ghost-connected state.
+        // Inactive time unit: AP beacon intervals (typically 100 ms).
+        // Value range 6..=200. Default ~6 (≈ 600 ms — too aggressive,
+        // false positives on noisy links). 10 = ~1 s tolerance.
         let rc = esp_idf_svc::sys::esp_wifi_set_inactive_time(
             esp_idf_svc::sys::wifi_interface_t_WIFI_IF_STA,
             10,
@@ -229,6 +247,10 @@ fn announce_connected(
             log::warn!("wifi: esp_wifi_set_inactive_time returned {rc}");
         }
     }
+    // Reset the flag in case we picked up a stale event during the
+    // disconnected period — we only care about beacon timeouts that
+    // happen FROM HERE ON.
+    sup.beacon_timeout.store(false, Ordering::Release);
     sup.set_state(WifiState::Connected { ssid: ssid.into(), ip });
 }
 
@@ -239,6 +261,15 @@ fn run_connected(sup: &Arc<WifiSupervisor>, wifi: &mut BlockingWifi<EspWifi<'sta
     let mut probe_fails: u32 = 0;
     let mut ticks: u32 = 0;
     while wifi.is_connected().unwrap_or(false) {
+        // Beacon timeout from our event-loop subscription — the IDF
+        // driver under PS_MIN_MODEM sometimes wedges instead of
+        // following beacon-timeout → 5 probes → DISCONNECTED. We
+        // bypass that by treating the BEACON_TIMEOUT event itself as
+        // "link is dead, reconnect now".
+        if sup.beacon_timeout.swap(false, Ordering::AcqRel) {
+            log::warn!("wifi: WIFI_EVENT_STA_BEACON_TIMEOUT — forcing reconnect");
+            break;
+        }
         serve_scan_request(sup, wifi);
         if *sup.rescan_signal.lock().unwrap() {
             break;
