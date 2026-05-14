@@ -189,7 +189,17 @@ fn run(
         if connected {
             run_connected(&sup, &mut wifi);
         } else if !networks.is_empty() {
-            run_ap_fallback(&sup, &mut wifi);
+            // Saved networks exist. Don't enter AP fallback here —
+            // the IDF wifi driver's AP-mode start path crashes
+            // (ieee80211_hostap_attach null deref via the 752-byte
+            // beacon-buffer alloc failing) when internal DRAM is
+            // fragmented, which is exactly when a wedged STA path
+            // brings us here. Instead, back off briefly and retry
+            // STA. The user already configured WiFi; AP fallback
+            // is only useful for the no-networks-configured case
+            // below.
+            log::info!("wifi: STA connect failed, backing off 10 s then retrying");
+            thread::sleep(Duration::from_secs(10));
         } else {
             run_ap_permanent(&sup, &mut wifi);
         }
