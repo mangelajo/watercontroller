@@ -299,6 +299,7 @@
     <button data-tab="vpn">VPN</button>
     <button data-tab="auth">Auth</button>
     <button data-tab="ota">OTA</button>
+    <button data-tab="webhooks">Webhooks</button>
     <button data-tab="advanced">Advanced</button>
     <button data-tab="logs">Logs</button>
   </nav>
@@ -689,6 +690,49 @@
       </section>
     </section>
 
+    <!-- ====== Webhooks ====== -->
+    <section id="webhooks" class="tab">
+      <section class="card full">
+        <h2>Outbound webhooks</h2>
+        <p class="status-msg">POST a JSON payload to your URL when an event fires
+          (flow alarm, boot, config change, etc.). Body is rendered from a
+          <code>{{var}}</code> template — every event carries <code>event</code>,
+          <code>event_label</code>, <code>iso_ts</code>, <code>device</code>,
+          <code>uptime_s</code>; specific events add their own variables (e.g.
+          <code>flow_lph</code>, <code>section</code>).
+          Up to 4 webhooks; oldest is dropped when you save a fifth.</p>
+        <div id="webhooks-list"></div>
+        <div class="row" style="margin-top: 10px;">
+          <button class="btn" id="webhooks-add">Add webhook</button>
+          <button class="btn primary" id="webhooks-save">Save webhooks</button>
+          <span class="status-msg" id="webhooks-msg"></span>
+        </div>
+        <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--border);">
+        <h2 style="margin-top: 0;">Test fire</h2>
+        <p class="status-msg">Emit a synthetic event through the same path the
+          firmware uses. Lets you verify the URL/headers/template land on the
+          receiver without waiting for a real flow alarm.</p>
+        <div class="row">
+          <select id="webhooks-test-kind" style="min-width: 220px;">
+            <option value="flow_alarm.fire">flow_alarm.fire</option>
+            <option value="flow_alarm.clear">flow_alarm.clear</option>
+            <option value="boot">boot</option>
+            <option value="panic_boot">panic_boot</option>
+            <option value="schedule.fire">schedule.fire</option>
+            <option value="wifi.flap">wifi.flap</option>
+            <option value="mqtt.down">mqtt.down</option>
+            <option value="ota.completed">ota.completed</option>
+            <option value="ota.rollback">ota.rollback</option>
+            <option value="water_budget.exceeded">water_budget.exceeded</option>
+            <option value="config.changed">config.changed</option>
+            <option value="manual.valve_off">manual.valve_off</option>
+          </select>
+          <button class="btn" id="webhooks-test-fire">Fire test event</button>
+          <span class="status-msg" id="webhooks-test-msg"></span>
+        </div>
+      </section>
+    </section>
+
     <!-- ====== Advanced ====== -->
     <section id="advanced" class="tab">
       <section class="card full">
@@ -946,6 +990,8 @@
       ]);
       if (SETTINGS_TABS.has(tab) && !currentConfig) loadConfig();
       setDiagPolling(tab === "advanced");
+      // Webhooks aren't part of the main config blob — fetch on tab open.
+      if (tab === "webhooks") loadWebhooks();
     });
   }
 
@@ -1235,6 +1281,170 @@
     };
     saveConfig("flow_alarm");
   });
+  // ---------------- Webhooks ----------------
+  // Loaded from /api/config/webhooks (not the full /api/config blob), so
+  // editing is independent of the rest of the config form lifecycle.
+  let webhooks = [];
+  async function loadWebhooks() {
+    try {
+      const r = await fetch("/api/config/webhooks");
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      webhooks = await r.json();
+      renderWebhooks();
+    } catch (e) {
+      msgErr("#webhooks-msg", "load failed: " + e.message);
+    }
+  }
+  const EVENT_KINDS = [
+    "flow_alarm.fire", "flow_alarm.clear", "boot", "panic_boot",
+    "schedule.fire", "wifi.flap", "mqtt.down", "ota.completed",
+    "ota.rollback", "water_budget.exceeded", "config.changed", "manual.valve_off",
+  ];
+  function renderWebhooks() {
+    const root = $("#webhooks-list");
+    root.innerHTML = "";
+    webhooks.forEach((w, i) => {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.style.cssText = "margin-bottom: 12px; background: var(--panel-2);";
+      const headersStr = (w.headers || []).map(h =>
+        `${h.name}: ${h.value}`).join("\n");
+      const eventsChecks = EVENT_KINDS.map(k => {
+        const checked = (w.events || []).includes(k) ? "checked" : "";
+        return `<label style="display:inline-block; margin-right: 12px; font-size: 12px;">
+          <input type="checkbox" data-wh-events="${i}" value="${k}" ${checked}>
+          ${escapeHtml(k)}</label>`;
+      }).join("");
+      card.innerHTML = `
+        <div class="row" style="justify-content: space-between; align-items: baseline;">
+          <h3 style="margin: 0;">Webhook #${i+1}</h3>
+          <button class="btn" data-wh-del="${i}" style="padding: 4px 10px;">Delete</button>
+        </div>
+        <div class="field">
+          <label>Enabled</label>
+          <input type="checkbox" data-wh-enabled="${i}" ${w.enabled ? "checked" : ""}>
+        </div>
+        <div class="field">
+          <label>URL (http:// or https://)</label>
+          <input type="url" data-wh-url="${i}" value="${escapeHtml(w.url || "")}" placeholder="https://hooks.slack.com/services/...">
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label>Preset</label>
+            <select data-wh-kind="${i}">
+              <option value="generic"${w.kind==="generic"?" selected":""}>Generic JSON</option>
+              <option value="slack"${w.kind==="slack"?" selected":""}>Slack</option>
+              <option value="discord"${w.kind==="discord"?" selected":""}>Discord</option>
+              <option value="home_assistant"${w.kind==="home_assistant"?" selected":""}>Home Assistant</option>
+            </select>
+            <span class="hint">Sets sane defaults if you re-pick after Save. Body template is whatever you put below.</span>
+          </div>
+          <div class="field">
+            <label>HTTP method</label>
+            <select data-wh-method="${i}">
+              <option value="POST"${w.method==="POST"?" selected":""}>POST</option>
+              <option value="PUT"${w.method==="PUT"?" selected":""}>PUT</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label>Events to subscribe to</label>
+          <div style="line-height: 1.8;">${eventsChecks}</div>
+        </div>
+        <div class="field">
+          <label>Headers (one per line, <code>Name: value</code>)</label>
+          <textarea data-wh-headers="${i}" rows="3" style="font-family: monospace; font-size: 12px;">${escapeHtml(headersStr)}</textarea>
+          <span class="hint">Content-Type defaults to <code>application/json</code> if you don't set one.</span>
+        </div>
+        <div class="field">
+          <label>Body template (<code>{{event}}</code>, <code>{{flow_lph}}</code>, etc.)</label>
+          <textarea data-wh-body="${i}" rows="3" style="font-family: monospace; font-size: 12px;">${escapeHtml(w.body_template || "")}</textarea>
+        </div>
+      `;
+      root.appendChild(card);
+    });
+    if (webhooks.length === 0) {
+      root.innerHTML = `<p class="status-msg" style="font-style: italic;">No webhooks configured. Click "Add webhook" to start.</p>`;
+    }
+    // Wire delete buttons
+    root.querySelectorAll("[data-wh-del]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const i = +btn.dataset.whDel;
+        webhooks.splice(i, 1);
+        renderWebhooks();
+      });
+    });
+  }
+  function collectWebhooksFromForm() {
+    return webhooks.map((_w, i) => {
+      const events = Array.from(document.querySelectorAll(`[data-wh-events="${i}"]:checked`))
+        .map(el => el.value);
+      const headersStr = ($(`[data-wh-headers="${i}"]`).value || "").trim();
+      const headers = headersStr.split("\n").map(l => l.trim()).filter(Boolean).map(line => {
+        const idx = line.indexOf(":");
+        if (idx === -1) return null;
+        return { name: line.slice(0, idx).trim(), value: line.slice(idx + 1).trim() };
+      }).filter(Boolean);
+      return {
+        enabled: $(`[data-wh-enabled="${i}"]`).checked,
+        url: $(`[data-wh-url="${i}"]`).value.trim(),
+        kind: $(`[data-wh-kind="${i}"]`).value,
+        events,
+        method: $(`[data-wh-method="${i}"]`).value,
+        headers,
+        body_template: $(`[data-wh-body="${i}"]`).value,
+      };
+    });
+  }
+  $("#webhooks-add").addEventListener("click", () => {
+    if (webhooks.length >= 4) {
+      msgErr("#webhooks-msg", "max 4 webhooks");
+      return;
+    }
+    webhooks = collectWebhooksFromForm();  // preserve any unsaved edits
+    webhooks.push({
+      enabled: true, url: "", kind: "generic",
+      events: ["flow_alarm.fire"],
+      method: "POST", headers: [],
+      body_template: '{"event":"{{event}}","device":"{{device}}","flow_lph":"{{flow_lph}}","ts":"{{iso_ts}}"}',
+    });
+    renderWebhooks();
+  });
+  $("#webhooks-save").addEventListener("click", async () => {
+    const body = collectWebhooksFromForm();
+    msgInfo("#webhooks-msg", "saving…");
+    try {
+      const r = await fetch("/api/config/webhooks", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify(body),
+      });
+      if (r.status === 401) { msgErr("#webhooks-msg", "401 — admin token missing/wrong"); return; }
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      webhooks = body;
+      renderWebhooks();
+      msgOk("#webhooks-msg", "saved");
+    } catch (e) {
+      msgErr("#webhooks-msg", "save failed: " + e.message);
+    }
+  });
+  $("#webhooks-test-fire").addEventListener("click", async () => {
+    const kind = $("#webhooks-test-kind").value;
+    msgInfo("#webhooks-test-msg", "firing…");
+    try {
+      const r = await fetch("/api/webhooks/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ kind, vars: { flow_lph: "999", section: "test" } }),
+      });
+      if (r.status === 401) { msgErr("#webhooks-test-msg", "401 — admin token missing/wrong"); return; }
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      msgOk("#webhooks-test-msg", `event ${kind} emitted (check Logs for dispatch result)`);
+    } catch (e) {
+      msgErr("#webhooks-test-msg", "fire failed: " + e.message);
+    }
+  });
+
   $("#alarm-clear").addEventListener("click", async () => {
     msgInfo("#flow_alarm-msg", "clearing…");
     try {
