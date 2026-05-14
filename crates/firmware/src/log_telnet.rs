@@ -11,7 +11,8 @@ use watercontroller_core::log_buffer;
 
 pub fn spawn(port: u16) {
     // 6 KiB ran with only 1096 B headroom. 8 KiB gives ~3 KiB margin.
-    spawn_named(c"telnet-log", 8 * 1024, move || {
+    // Listener only — accepts and hands off. Peak <2 KiB.
+    spawn_named(c"telnet-log", 4 * 1024, move || {
         let bind = format!("0.0.0.0:{port}");
         let listener = match TcpListener::bind(&bind) {
             Ok(l) => l,

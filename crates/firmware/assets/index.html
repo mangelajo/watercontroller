@@ -718,11 +718,23 @@
           Useful for spotting memory pressure (low <em>min ever free</em>) or tasks
           dangerously close to overflowing their stack (low <em>stack free</em>).</p>
         <div class="grid2" id="diag-heap">
-          <div class="field"><label>Heap free</label><span class="diag-val" id="diag-free">—</span></div>
+          <div class="field"><label>Heap free (total)</label><span class="diag-val" id="diag-free">—</span></div>
           <div class="field"><label>Largest free block</label><span class="diag-val" id="diag-largest">—</span></div>
           <div class="field"><label>Min ever free (since boot)</label><span class="diag-val" id="diag-min">—</span></div>
           <div class="field"><label>Total allocated</label><span class="diag-val" id="diag-alloc">—</span></div>
+          <div class="field"><label>Internal DRAM free</label><span class="diag-val" id="diag-internal-free">—</span></div>
+          <div class="field"><label>Internal largest block</label><span class="diag-val" id="diag-internal-largest">—</span></div>
+          <div class="field"><label>Internal min ever free</label><span class="diag-val" id="diag-internal-min">—</span></div>
+          <div class="field"><label>PSRAM free / largest</label><span class="diag-val" id="diag-psram">—</span></div>
         </div>
+        <p class="status-msg" style="margin-top: 6px;">
+          Internal DRAM (~290 KiB on ESP32) is the scarce pool — task stacks,
+          DMA buffers, and small allocations all compete for it. PSRAM is much
+          larger but 32-bit-access-only, so it can't hold task stacks.
+          <em>Internal largest block</em> falling under ~8 KiB is what
+          triggers ENOMEM on new task spawns even when total free looks
+          comfortable.
+        </p>
         <table class="diag-tasks" id="diag-tasks-table" style="margin-top: 12px;">
           <thead>
             <tr>
@@ -959,6 +971,13 @@
       $("#diag-largest").textContent = fmt(d.heap.largest_free_block) + " B";
       $("#diag-min").textContent     = fmt(d.heap.min_ever_free_bytes) + " B";
       $("#diag-alloc").textContent   = fmt(d.heap.total_allocated_bytes) + " B";
+      if (d.heap.internal_free_bytes !== undefined) {
+        $("#diag-internal-free").textContent = fmt(d.heap.internal_free_bytes) + " B";
+        $("#diag-internal-largest").textContent = fmt(d.heap.internal_largest_free) + " B";
+        $("#diag-internal-min").textContent = fmt(d.heap.internal_min_ever_free) + " B";
+        $("#diag-psram").textContent = fmt(d.heap.psram_free_bytes) + " B / "
+          + fmt(d.heap.psram_largest_free) + " B largest";
+      }
       const tbody = $("#diag-tasks-table tbody");
       // Sort by stack_min_free ascending so the riskiest tasks float to the top.
       const tasks = [...d.tasks].sort((a, b) => a.stack_min_free_bytes - b.stack_min_free_bytes);

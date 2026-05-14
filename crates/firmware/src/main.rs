@@ -472,7 +472,10 @@ fn spawn_sensor_task<B, P, C>(
 fn spawn_mqtt_supervisor(app: App, mqtt: Arc<EspMqtt>, wifi: Arc<WifiSupervisor>) {
     // 8 KiB ran with only 376 B headroom — mbedTLS handshake during the
     // initial broker connect is hungry. 12 KiB leaves ~4 KiB margin.
-    task_util::spawn_named(c"mqtt-sup", 12 * 1024, move || {
+    // TLS handshake to MQTT broker peaks ~5-6 KiB; 8 KiB leaves
+    // ~2 KiB safety. Was 12 KiB before the task_util fix made our
+    // request actually stick.
+    task_util::spawn_named(c"mqtt-sup", 8 * 1024, move || {
             use watercontroller_core::traits::WifiState;
             // Exponential backoff on failed connects. The IDF MQTT
             // client's auth-refused failure surfaces as a Disconnected
@@ -551,6 +554,7 @@ fn spawn_wifi_state_mirror(
     wifi: Arc<WifiSupervisor>,
     captive_redirect: captive_dns::RedirectIp,
 ) {
+    // 4 KiB: 3 KiB measured 988 B free at peak, too tight; +1 KiB.
     task_util::spawn_named(c"wifi-mirror", 4 * 1024, move || loop {
         let st = wifi.state();
         // Captive DNS only redirects when the device itself is the AP —
@@ -566,7 +570,7 @@ fn spawn_wifi_state_mirror(
 }
 
 fn spawn_schedule_task(app: App, clock: Arc<dyn Clock>) {
-    task_util::spawn_named(c"schedule", 8 * 1024, move || {
+    task_util::spawn_named(c"schedule", 4 * 1024, move || {
             // Evaluator works in *local* time. SNTP sets the system TZ via
             // CONFIG_NEWLIB_LIBC_TZ_BUILTIN; chrono::Utc::now() returns UTC,
             // we apply a fixed-offset based on the configured TZ name only

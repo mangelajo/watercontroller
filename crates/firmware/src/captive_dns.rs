@@ -20,8 +20,12 @@ use std::sync::{Arc, Mutex};
 pub type RedirectIp = Arc<Mutex<Option<Ipv4Addr>>>;
 
 pub fn spawn(redirect: RedirectIp) {
-    // 6 KiB ran with only 640 B headroom. 8 KiB gives ~2 KiB margin.
-    spawn_named(c"captive-dns", 8 * 1024, move || {
+    // Observed peak ~2.6 KiB (DNS parse + reply build). The old
+    // "6 KiB ran with only 640 B headroom" reading was the
+    // task_util bug (43f497a) — actual stack was ~10 KiB, peak
+    // ~2.6 KiB, HWM happened to land at 640 B free of that 10 KiB.
+    // 4 KiB now genuinely allocates 4 KiB with ~1.4 KiB margin.
+    spawn_named(c"captive-dns", 4 * 1024, move || {
             let socket = match UdpSocket::bind("0.0.0.0:53") {
                 Ok(s) => s,
                 Err(e) => {

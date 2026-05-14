@@ -46,14 +46,12 @@ pub fn spawn(
     // clear`) still do an explicit `(*app.config()).clone()` to get
     // an owned Config for the mutation, but those run on a flat call
     // chain (no nested format machinery), so they fit comfortably.
-    // 20 KiB stack: peak usage on this target scales with stack size
-    // (xtensa context save + compiler prologue allocation), so 10 KiB
-    // / 12 KiB landed us with ~140 B headroom and crashed twice.
-    // Going aggressive: 20 KiB gives ~4 KiB headroom in practice and
-    // fits comfortably in PSRAM-augmented heap. On a non-PSRAM module
-    // disable this whole module via `--no-default-features` —
-    // production builds shouldn't pay for an interactive console.
-    crate::task_util::spawn_named(c"serial-cli", 20 * 1024, move || {
+    // Observed peak ~3.5 KiB (dispatch + format helpers + line
+    // buffer). 8 KiB gives ~4 KiB headroom for the worst command
+    // path (`tasks`, `webhook fire`, `wifi list`). Previous 20 KiB
+    // was overkill — the earlier crashes were the task_util bug
+    // capping everything at ~10 KiB regardless of request.
+    crate::task_util::spawn_named(c"serial-cli", 8 * 1024, move || {
         run(app, nvs, wifi);
     });
 }

@@ -68,7 +68,11 @@ impl WifiSupervisor {
         // get_ap_info probe is factored into a `#[inline(never)]` helper
         // (`probe_link`) so its heavy locals don't bloat `run()`'s
         // permanent stack frame.
-        crate::task_util::spawn_named(c"wifi-sup", 16 * 1024, move || {
+        // Observed peak ~3 KiB at idle, ~5 KiB during STA→AP
+        // transitions / scan. 8 KiB gives ~3 KiB headroom.
+        // (Pre-task_util-fix this task was actually getting ~10 KiB
+        // and HWM lied at 432 — see commit 43f497a.)
+        crate::task_util::spawn_named(c"wifi-sup", 8 * 1024, move || {
             if let Err(e) = run(s, modem, sys_loop, nvs) {
                 log::error!("wifi supervisor terminated: {e:?}");
             }

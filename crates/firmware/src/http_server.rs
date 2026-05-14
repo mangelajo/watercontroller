@@ -868,7 +868,8 @@ where
 fn spawn_ws_fanout(senders: Arc<Mutex<Vec<EspHttpWsDetachedSender>>>) {
     use std::time::Instant;
     // Duration is imported at the module top.
-    crate::task_util::spawn_named(c"ws-log-fanout", 8 * 1024, move || {
+    // Peak ~2 KiB (one log record + send call per iteration).
+    crate::task_util::spawn_named(c"ws-log-fanout", 4 * 1024, move || {
             let Some(buf) = log_buffer::global() else {
                 return;
             };

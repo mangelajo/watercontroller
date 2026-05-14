@@ -43,11 +43,14 @@ impl EspWebhookDispatcher {
         // drops rather than blocking the calling task.
         let (tx, rx) = mpsc::sync_channel::<WebhookEvent>(QUEUE_CAP);
         let app_clone = app.clone();
-        // 16 KiB stack: the HTTP client + mbedTLS handshake path is
-        // hungry (an 8 KiB run overflowed during the first
-        // config.changed dispatch on hardware). Headroom is more
-        // important than DRAM here — we have plenty in PSRAM.
-        crate::task_util::spawn_named(c"webhook-sup", 16 * 1024, move || {
+        // 12 KiB stack. The earlier 16 KiB was set when we thought
+        // the task_util bug was a code-side stack issue (it wasn't —
+        // see 43f497a). HTTPS handshake for outbound webhooks is
+        // hungry, so we leave more margin here than for non-TLS
+        // tasks: observed idle peak 2.7 KiB; the TLS handshake path
+        // bumps it ~8-10 KiB (mbedTLS allocates from stack during
+        // ECDHE). 12 KiB gives ~2-3 KiB worst-case headroom.
+        crate::task_util::spawn_named(c"webhook-sup", 12 * 1024, move || {
             log::info!("webhook dispatcher task started");
             for event in rx.iter() {
                 handle_event(&app_clone, &event);

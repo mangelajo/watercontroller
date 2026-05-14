@@ -27,6 +27,17 @@ pub struct HeapInfo {
     pub total_allocated_bytes: usize,
     pub largest_free_block: usize,
     pub min_ever_free_bytes: usize,
+    /// Breakdown by memory class. Internal DRAM is the scarce one
+    /// (~290 KiB total); PSRAM is much larger but can't hold task
+    /// stacks (FreeRTOS limitation) or DMA buffers (32-bit access
+    /// only). Fragmentation in `internal_largest_free` is what
+    /// triggers ENOMEM on `spawn_named` even when total_free shows
+    /// 4 MB available.
+    pub internal_free_bytes: usize,
+    pub internal_largest_free: usize,
+    pub internal_min_ever_free: usize,
+    pub psram_free_bytes: usize,
+    pub psram_largest_free: usize,
 }
 
 #[derive(Serialize)]
@@ -50,15 +61,26 @@ pub fn snapshot() -> DiagSnapshot {
 }
 
 fn heap_info() -> HeapInfo {
-    let mut info = MaybeUninit::<multi_heap_info_t>::zeroed();
+    let mut total = MaybeUninit::<multi_heap_info_t>::zeroed();
+    let mut internal = MaybeUninit::<multi_heap_info_t>::zeroed();
+    let mut spiram = MaybeUninit::<multi_heap_info_t>::zeroed();
     unsafe {
-        heap_caps_get_info(info.as_mut_ptr(), MALLOC_CAP_8BIT);
-        let info = info.assume_init();
+        heap_caps_get_info(total.as_mut_ptr(), MALLOC_CAP_8BIT);
+        heap_caps_get_info(internal.as_mut_ptr(), MALLOC_CAP_INTERNAL);
+        heap_caps_get_info(spiram.as_mut_ptr(), MALLOC_CAP_SPIRAM);
+        let total = total.assume_init();
+        let internal = internal.assume_init();
+        let spiram = spiram.assume_init();
         HeapInfo {
-            total_free_bytes: info.total_free_bytes,
-            total_allocated_bytes: info.total_allocated_bytes,
-            largest_free_block: info.largest_free_block,
-            min_ever_free_bytes: info.minimum_free_bytes,
+            total_free_bytes: total.total_free_bytes,
+            total_allocated_bytes: total.total_allocated_bytes,
+            largest_free_block: total.largest_free_block,
+            min_ever_free_bytes: total.minimum_free_bytes,
+            internal_free_bytes: internal.total_free_bytes,
+            internal_largest_free: internal.largest_free_block,
+            internal_min_ever_free: internal.minimum_free_bytes,
+            psram_free_bytes: spiram.total_free_bytes,
+            psram_largest_free: spiram.largest_free_block,
         }
     }
 }
