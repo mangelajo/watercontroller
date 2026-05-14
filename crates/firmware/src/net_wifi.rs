@@ -198,6 +198,37 @@ fn announce_connected(
 ) {
     let ip = ip_string(wifi);
     log::info!("wifi: connected ssid={ssid} ip={ip}");
+    // Disable WiFi power-saving (PS_MIN_MODEM is the IDF default).
+    // PS_MIN_MODEM has a well-documented failure mode: under beacon
+    // timeout with certain APs (e.g. Ubiquiti), the driver enters a
+    // "ghost connected" state — STA association is intact and
+    // get_ap_info() keeps returning cached RSSI, but the data path
+    // is dead and our probe_link can't detect it. See esp-idf
+    // issues #11615 and #13491. We're mains-powered; no reason to
+    // pay the reliability tax. Idempotent — safe to call on every
+    // (re)connect.
+    unsafe {
+        let rc = esp_idf_svc::sys::esp_wifi_set_ps(
+            esp_idf_svc::sys::wifi_ps_type_t_WIFI_PS_NONE,
+        );
+        if rc != esp_idf_svc::sys::ESP_OK {
+            log::warn!("wifi: esp_wifi_set_ps(NONE) returned {rc}");
+        } else {
+            log::info!("wifi: power-save disabled (PS_NONE)");
+        }
+        // Tighten beacon-timeout to 10 s (default ~6 s). If we miss
+        // 10 s worth of beacons the driver will probe-then-disconnect
+        // rather than wedging. Trade-off: a noisy AP can drop us
+        // sooner; for us a clean reconnect cycle is preferable to a
+        // ghost-connected state.
+        let rc = esp_idf_svc::sys::esp_wifi_set_inactive_time(
+            esp_idf_svc::sys::wifi_interface_t_WIFI_IF_STA,
+            10,
+        );
+        if rc != esp_idf_svc::sys::ESP_OK {
+            log::warn!("wifi: esp_wifi_set_inactive_time returned {rc}");
+        }
+    }
     sup.set_state(WifiState::Connected { ssid: ssid.into(), ip });
 }
 
