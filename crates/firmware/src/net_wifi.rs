@@ -385,22 +385,81 @@ fn probe_link(
     wifi: &mut BlockingWifi<EspWifi<'static>>,
     probe_fails: &mut u32,
 ) -> bool {
-    match wifi.wifi_mut().driver_mut().get_ap_info() {
+    // Two-layer probe:
+    // 1. get_ap_info() — confirms the STA association is intact.
+    //    Cheap, no packets on the air.
+    // 2. End-to-end TCP probe to the gateway — confirms the data
+    //    path is alive. ESP-IDF has a well-documented bug
+    //    (#13491, #11615) where the driver keeps reporting a
+    //    healthy association after beacon timeout but stops being
+    //    able to send frames ("wifi:m f null" flood). Our
+    //    WIFI_EVENT_STA_BEACON_TIMEOUT subscription catches the
+    //    common case; the gateway probe is the backstop for when
+    //    even that event doesn't fire.
+    let assoc_ok = match wifi.wifi_mut().driver_mut().get_ap_info() {
         Ok(info) => {
-            *probe_fails = 0;
             let rssi: i32 = info.signal_strength as i32;
             log::info!("wifi: rssi {rssi}");
             true
         }
-        Err(_) => {
-            *probe_fails += 1;
-            let n = *probe_fails;
-            log::warn!("wifi: probe failed (consecutive {n})");
-            if n >= 3 {
-                log::warn!("wifi: forcing reconnect after probe failures");
-                false
-            } else {
-                true
+        Err(_) => false,
+    };
+    let gateway_ok = if assoc_ok { gateway_reachable(wifi) } else { false };
+    if assoc_ok && gateway_ok {
+        *probe_fails = 0;
+        return true;
+    }
+    *probe_fails += 1;
+    let n = *probe_fails;
+    let reason = if !assoc_ok {
+        "no AP info"
+    } else {
+        "gateway unreachable"
+    };
+    log::warn!("wifi: probe failed ({reason}, consecutive {n})");
+    if n >= 3 {
+        log::warn!("wifi: forcing reconnect after probe failures");
+        false
+    } else {
+        true
+    }
+}
+
+/// Try to TCP-connect to the netif's default gateway as a data-path
+/// liveness check. Any TCP response counts as "alive" — even RST
+/// (port closed) means a packet round-tripped. Only a connect timeout
+/// or "network unreachable" counts as dead.
+///
+/// Cheap: short 2 s timeout, single SYN packet on success/RST.
+/// Heavy: ICMP ping would be cleaner but requires the IDF ping
+/// component + a raw socket; TCP works through std::net.
+#[inline(never)]
+fn gateway_reachable(wifi: &BlockingWifi<EspWifi<'static>>) -> bool {
+    use std::net::{IpAddr, SocketAddr, TcpStream};
+    use std::time::Duration as StdDuration;
+    let gw_v4 = match wifi.wifi().sta_netif().get_ip_info() {
+        Ok(info) => info.subnet.gateway,
+        Err(_) => return true, // can't tell → benefit of the doubt
+    };
+    if gw_v4.octets() == [0, 0, 0, 0] {
+        return true; // no gateway configured yet, don't penalise
+    }
+    let gw_octets = gw_v4.octets();
+    let gw = std::net::Ipv4Addr::new(gw_octets[0], gw_octets[1], gw_octets[2], gw_octets[3]);
+    let addr = SocketAddr::new(IpAddr::V4(gw), 80);
+    match TcpStream::connect_timeout(&addr, StdDuration::from_secs(2)) {
+        Ok(_) => true,
+        Err(e) => {
+            use std::io::ErrorKind;
+            match e.kind() {
+                // ConnectionRefused = port closed but packets flow — link OK.
+                ErrorKind::ConnectionRefused => true,
+                // TimedOut / NetworkUnreachable / HostUnreachable = link bad.
+                _ => {
+                    let kind = e.kind();
+                    log::warn!("wifi: gateway TCP probe failed: {kind:?}");
+                    false
+                }
             }
         }
     }
