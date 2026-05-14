@@ -745,6 +745,19 @@
           <button class="btn" id="cfg-reload">Reload from device</button>
           <span class="status-msg" id="cfg-msg"></span>
         </div>
+        <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--border);">
+        <h3 style="margin-top: 0;">Backup &amp; restore</h3>
+        <p class="status-msg">Download a JSON snapshot of the full
+          configuration — <strong>including WiFi passwords, MQTT credentials,
+          TLS private keys, and the admin token</strong>. Treat the file as
+          sensitive: keep it offline, encrypt it at rest. Upload a previously
+          downloaded snapshot to restore the device (it will reboot).</p>
+        <div class="row">
+          <button class="btn" id="cfg-download">Download config (with secrets)</button>
+          <input type="file" id="cfg-upload-input" accept="application/json,.json" style="display: none;">
+          <button class="btn" id="cfg-upload-btn">Upload &amp; restore…</button>
+          <span class="status-msg" id="cfg-backup-msg"></span>
+        </div>
       </section>
       <section class="card full">
         <h2>Danger zone</h2>
@@ -1698,6 +1711,55 @@
     currentConfig = parsed;
     await saveConfig("cfg");
     renderAllForms();
+  });
+  // Backup: pulls /api/config?all (auth-gated) so the file contains
+  // wifi passwords / TLS keys / admin token — useful for re-flashing
+  // or migrating to a fresh device. Saved as a timestamped JSON file.
+  $("#cfg-download").addEventListener("click", async () => {
+    msgInfo("#cfg-backup-msg", "fetching full config…");
+    try {
+      const r = await fetch("/api/config?all=1", { headers: authHeaders() });
+      if (r.status === 401) { msgErr("#cfg-backup-msg", "401 — admin token missing/wrong"); return; }
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const body = await r.text();
+      const blob = new Blob([body], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      a.href = url;
+      a.download = `doremorwater-config-${ts}.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      msgOk("#cfg-backup-msg", "downloaded");
+    } catch (e) {
+      msgErr("#cfg-backup-msg", "download failed: " + e.message);
+    }
+  });
+  $("#cfg-upload-btn").addEventListener("click", () => $("#cfg-upload-input").click());
+  $("#cfg-upload-input").addEventListener("change", async (ev) => {
+    const file = ev.target.files[0];
+    if (!file) return;
+    if (!confirm(`Restore config from "${file.name}"? The device will reboot.`)) {
+      ev.target.value = "";
+      return;
+    }
+    msgInfo("#cfg-backup-msg", "uploading…");
+    try {
+      const text = await file.text();
+      JSON.parse(text);  // validate before sending
+      const r = await fetch("/api/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: text,
+      });
+      if (r.status === 401) { msgErr("#cfg-backup-msg", "401 — admin token missing/wrong"); return; }
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      msgOk("#cfg-backup-msg", "restored — reload after reboot");
+    } catch (e) {
+      msgErr("#cfg-backup-msg", "restore failed: " + e.message);
+    } finally {
+      ev.target.value = "";
+    }
   });
 
   function renderAllForms() {

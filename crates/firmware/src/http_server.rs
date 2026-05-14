@@ -254,11 +254,25 @@ fn register_handlers(
     {
         let app = app.clone();
         server.fn_handler::<EspIOError, _>(routes::CONFIG, Method::Get, move |req| {
-            // Strip secrets before serialising — the SPA only needs to see
-            // public fields. PUT path uses `merge_preserving_secrets` to
-            // avoid wiping stored values when the form posts blanks back.
-            let body = serde_json::to_vec(&app.config().redact_secrets_for_api())
-                .unwrap_or_default();
+            // `?all` (or `?all=1`) opts into the full config — including
+            // wifi passwords, MQTT credentials, TLS private keys,
+            // admin token. Used by the SPA's "Download config" button
+            // for backup. Auth-gated: an attacker can't grab credentials
+            // even if the device is exposed to a hostile LAN. Without
+            // the flag, the regular form-population path runs with
+            // secrets redacted (matches what `redact_secrets_for_api`
+            // ships for the UI; PUT side uses `merge_preserving_secrets`
+            // to keep stored secrets intact when blank fields come back).
+            let want_all = req.uri().contains("all");
+            let cfg = if want_all {
+                if require_auth(&req, &app).is_err() {
+                    return write_unauthorized(req);
+                }
+                (*app.config()).clone()
+            } else {
+                app.config().redact_secrets_for_api()
+            };
+            let body = serde_json::to_vec(&cfg).unwrap_or_default();
             let mut resp = req.into_response(200, None, JSON_CT)?;
             resp.write_all(&body)?;
             Ok(())

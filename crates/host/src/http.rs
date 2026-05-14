@@ -157,8 +157,18 @@ async fn get_status(State(s): State<Arc<AppState>>) -> Json<watercontroller_core
     Json(s.app.snapshot())
 }
 
-async fn get_config(State(s): State<Arc<AppState>>) -> Json<watercontroller_core::config::Config> {
-    Json(s.app.config().redact_secrets_for_api())
+async fn get_config(
+    State(s): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<watercontroller_core::config::Config> {
+    // `?all` (any value) returns the full config including secrets,
+    // for backup/export. Matches the firmware path. Host build doesn't
+    // do auth so this is open — fine for the dev binary.
+    if q.contains_key("all") {
+        Json((*s.app.config()).clone())
+    } else {
+        Json(s.app.config().redact_secrets_for_api())
+    }
 }
 
 async fn put_config(

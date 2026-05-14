@@ -246,3 +246,97 @@ def test_put_method_supported(host_url, mock_server, on_real_device):
     assert cap["method"] == "PUT"
     body = json.loads(cap["body"])
     assert body["section"] == "webhooks"
+
+
+# ---------- UI tests ----------------------------------------------------
+# These drive the Webhooks tab via Playwright. The fixtures here are the
+# standard ones from conftest.py (page, host_url).
+
+
+def test_ui_webhooks_tab_renders(host_url, page, on_real_device):
+    """The Webhooks tab exists in the nav and renders the test-fire
+    section. Smoke check that the SPA bundle includes the new tab."""
+    if on_real_device:
+        pytest.skip("real device may have user-configured webhooks; UI test mutates state")
+    page.goto(host_url)
+    tab_btn = page.locator('nav.tabs button[data-tab="webhooks"]')
+    from playwright.sync_api import expect
+    expect(tab_btn).to_be_visible()
+    tab_btn.click()
+    expect(page.locator("#webhooks-test-fire")).to_be_visible()
+    expect(page.locator("#webhooks-add")).to_be_visible()
+    # Empty-state hint should appear when no webhooks are configured.
+    # We clear via the API first to ensure a known state.
+    page.request.put(
+        f"{host_url}/api/config/webhooks",
+        data=json.dumps([]),
+        headers={"Content-Type": "application/json"},
+    )
+    # Re-enter the tab to refetch.
+    page.locator('nav.tabs button[data-tab="dashboard"]').click()
+    page.locator('nav.tabs button[data-tab="webhooks"]').click()
+    expect(page.locator("#webhooks-list")).to_contain_text("No webhooks configured")
+
+
+def test_ui_add_and_save_webhook_persists(host_url, page, mock_server, on_real_device):
+    """Add a webhook through the UI, save it, then verify GET
+    /api/config/webhooks reflects what the form sent."""
+    if on_real_device:
+        pytest.skip("real device can't reach mock_server")
+    # Start clean.
+    page.request.put(
+        f"{host_url}/api/config/webhooks",
+        data="[]",
+        headers={"Content-Type": "application/json"},
+    )
+    page.goto(host_url)
+    page.locator('nav.tabs button[data-tab="webhooks"]').click()
+    page.locator("#webhooks-add").click()
+    # The card for index 0 should now exist.
+    page.locator('input[data-wh-url="0"]').fill(f"{mock_server.base_url}/from_ui")
+    # Toggle: subscribe to boot (was preset to flow_alarm.fire only).
+    page.locator('input[data-wh-events="0"][value="boot"]').check()
+    page.locator('textarea[data-wh-body="0"]').fill('{"src":"ui-test","ev":"{{event}}"}')
+    page.locator("#webhooks-save").click()
+    from playwright.sync_api import expect
+    expect(page.locator("#webhooks-msg")).to_contain_text("saved", timeout=5000)
+    saved = page.request.get(f"{host_url}/api/config/webhooks").json()
+    assert len(saved) == 1
+    assert saved[0]["url"].endswith("/from_ui")
+    assert "boot" in saved[0]["events"]
+    assert "flow_alarm.fire" in saved[0]["events"]
+    assert "ui-test" in saved[0]["body_template"]
+
+
+def test_ui_test_fire_triggers_dispatch(host_url, page, mock_server, on_real_device):
+    """Hitting the Test-fire button with a configured webhook causes
+    the mock server to receive the rendered body."""
+    if on_real_device:
+        pytest.skip("real device can't reach mock_server")
+    # Pre-configure a webhook via the API so the UI test focuses on the
+    # button rather than the add+save dance.
+    page.request.put(
+        f"{host_url}/api/config/webhooks",
+        data=json.dumps([{
+            "enabled": True,
+            "url": f"{mock_server.base_url}/from_ui_test",
+            "kind": "generic",
+            "events": ["flow_alarm.fire"],
+            "method": "POST",
+            "headers": [{"name": "X-UI-Test", "value": "yes"}],
+            "body_template": '{"event":"{{event}}","flow":"{{flow_lph}}"}',
+        }]),
+        headers={"Content-Type": "application/json"},
+    )
+    page.goto(host_url)
+    page.locator('nav.tabs button[data-tab="webhooks"]').click()
+    page.locator("#webhooks-test-kind").select_option("flow_alarm.fire")
+    page.locator("#webhooks-test-fire").click()
+    from playwright.sync_api import expect
+    expect(page.locator("#webhooks-test-msg")).to_contain_text("emitted", timeout=5000)
+    _wait_for_captures(mock_server, 1)
+    cap = next(c for c in mock_server.captured if c["path"] == "/from_ui_test")
+    assert cap["headers"].get("x-ui-test") == "yes"
+    body = json.loads(cap["body"])
+    assert body["event"] == "flow_alarm.fire"
+    assert body["flow"] == "999"  # default vars from the SPA's fire path
