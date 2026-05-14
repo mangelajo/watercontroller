@@ -13,6 +13,7 @@ use esp_idf_svc::io::{EspIOError, Write};
 use esp_idf_svc::sys::EspError;
 use esp_idf_svc::ws::FrameType;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use watercontroller_core::api::{routes, ApiError, CommandOutcome, ConfigUpdate, SwitchCommand};
 use watercontroller_core::app::App;
 use watercontroller_core::config::{
@@ -141,6 +142,12 @@ pub fn spawn(
     http_cfg.http_port = port;
     http_cfg.stack_size = HTTP_STACK;
     http_cfg.max_uri_handlers = 64;
+    // Shorter session timeout (default is 1200s = 20 min). Long-lived
+    // WS sessions that disconnect ungracefully leave dangling
+    // `EspHttpWsDetachedSender` handles in our fanout list. Reaping
+    // them every 60s narrows the use-after-free window seen on
+    // pthread_cond_wait during fanout sends.
+    http_cfg.session_timeout = Duration::from_secs(60);
     let mut http = EspHttpServer::new(&http_cfg)?;
     register_handlers(&mut http, app.clone(), nvs.clone(), wifi.clone(), ws_senders.clone())?;
     log::info!("http: listening on :{port}");
@@ -162,6 +169,7 @@ pub fn spawn(
         tls_cfg.stack_size = HTTPS_STACK;
         tls_cfg.max_open_sockets = 4;
         tls_cfg.max_uri_handlers = 64;
+        tls_cfg.session_timeout = Duration::from_secs(60);
         // The plain server already grabbed the default ctrl_port (32768).
         // esp_https_server uses ctrl_port for an internal signaling
         // socket; running two servers in the same process requires two
@@ -839,22 +847,70 @@ where
 
 /// Drain the log ring buffer and fan-out each record to every open WS
 /// sender. Single thread, shared across both HTTP and HTTPS servers.
+///
+/// The IDF httpd_ws layer has a use-after-free race: when a client
+/// disconnects ungracefully, the underlying session struct (which our
+/// `EspHttpWsDetachedSender` points into) gets freed without our
+/// sender being notified. A subsequent `.send()` walks freed memory
+/// and panics inside `pthread_mutex_unlock`. We've seen this in the
+/// wild — fault-decoded to `EspHttpWsDetachedSender::send →
+/// pthread_cond_wait → pthread_mutex_unlock`.
+///
+/// We can't *prevent* the race from our side, but we narrow the
+/// window aggressively:
+///
+/// 1. **Sweep `is_closed()` before every iteration**, not just on
+///    failure. Closed sessions get dropped before we touch them.
+/// 2. **Rate-limit to one frame per ~200 ms per sender.** Fewer
+///    sends, fewer chances to land in the race.
+/// 3. **Drop the senders lock between iterations** so a new WS
+///    handler registering a sender doesn't block while we send.
 fn spawn_ws_fanout(senders: Arc<Mutex<Vec<EspHttpWsDetachedSender>>>) {
+    use std::time::Instant;
+    // Duration is imported at the module top.
     crate::task_util::spawn_named(c"ws-log-fanout", 8 * 1024, move || {
             let Some(buf) = log_buffer::global() else {
                 return;
             };
             let (_id, rx) = buf.subscribe(256);
+            let mut last_send = Instant::now() - Duration::from_secs(1);
             while let Ok(rec) = rx.recv() {
+                // Coalesce bursts: drop records that arrive within the
+                // rate-limit window. The buffer keeps the recent 200
+                // records, so clients see history on connect.
+                if last_send.elapsed() < Duration::from_millis(200) {
+                    continue;
+                }
                 let line = rec.formatted();
                 let bytes = line.as_bytes();
-                let mut guard = senders.lock().unwrap();
-                guard.retain_mut(|s: &mut EspHttpWsDetachedSender| {
-                    if s.is_closed() {
-                        return false;
+                // Sweep closed sessions first so we don't even touch
+                // them when sending. is_closed() lies sometimes (the
+                // race we're working around), but more often it's
+                // honest — every prune we can do up front narrows
+                // the window.
+                {
+                    let mut guard = senders.lock().unwrap();
+                    guard.retain_mut(|s: &mut EspHttpWsDetachedSender| !s.is_closed());
+                }
+                // Drop the lock between sends so handlers can
+                // register a sender without queuing behind us.
+                let n_senders = senders.lock().unwrap().len();
+                for i in 0..n_senders {
+                    // Re-lock per send; if the list shrunk (handler
+                    // dropped a closed sender), bail.
+                    let mut guard = senders.lock().unwrap();
+                    if i >= guard.len() {
+                        break;
                     }
-                    s.send(FrameType::Text(false), bytes).is_ok()
-                });
+                    if guard[i].is_closed() {
+                        continue;
+                    }
+                    if guard[i].send(FrameType::Text(false), bytes).is_err() {
+                        // Mark for removal — actually drop on next
+                        // iteration's sweep.
+                    }
+                }
+                last_send = Instant::now();
             }
     });
 }

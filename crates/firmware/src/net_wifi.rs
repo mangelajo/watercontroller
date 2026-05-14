@@ -217,18 +217,67 @@ fn run_connected(sup: &Arc<WifiSupervisor>, wifi: &mut BlockingWifi<EspWifi<'sta
     log::warn!("wifi: link lost, rescanning");
 }
 
-/// AP-mode fallback after a failed connect attempt: hold for
-/// `SCAN_LOOP_INTERVAL` then retry STA.
+/// AP-mode fallback after a failed connect attempt. Holds AP up while
+/// **scanning periodically** for known SSIDs; only returns (which lets
+/// the outer loop re-attempt STA) once a saved network is actually
+/// visible. Avoids hammering the AP↔STA mode-transition path on the
+/// IDF WiFi driver — that path triggered an `ieee80211_hostap_attach`
+/// null deref panic on a marginal link.
 #[inline(never)]
 fn run_ap_fallback(sup: &Arc<WifiSupervisor>, wifi: &mut BlockingWifi<EspWifi<'static>>) {
     enter_ap_mode(sup, wifi);
     let mut waited = Duration::ZERO;
-    while !*sup.rescan_signal.lock().unwrap() && waited < SCAN_LOOP_INTERVAL {
+    while !*sup.rescan_signal.lock().unwrap() {
         serve_scan_request(sup, wifi);
         thread::sleep(Duration::from_secs(2));
         waited += Duration::from_secs(2);
+        if waited >= SCAN_LOOP_INTERVAL {
+            // Periodically probe whether any saved SSID is now in
+            // range. Only leave AP mode if we find one — saves a
+            // mode-transition round trip otherwise.
+            waited = Duration::ZERO;
+            if known_ssid_visible(sup, wifi) {
+                log::info!("wifi: known SSID visible, leaving AP fallback");
+                break;
+            }
+            log::info!("wifi: no known SSID visible, staying in AP mode");
+        }
     }
     let _ = wifi.stop();
+}
+
+/// Scan from AP mode (yes, the radio can scan while AP is up — the IDF
+/// driver handles the channel hopping) and return true if any of our
+/// saved SSIDs is in the result. Failure to scan = pessimistic false
+/// (we stay in AP mode rather than risk another mode transition).
+#[inline(never)]
+fn known_ssid_visible(
+    sup: &Arc<WifiSupervisor>,
+    wifi: &mut BlockingWifi<EspWifi<'static>>,
+) -> bool {
+    let saved = sup.networks.lock().unwrap().clone();
+    if saved.is_empty() {
+        return false;
+    }
+    let aps = match wifi.scan() {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("wifi: AP-mode scan failed: {e:?}");
+            return false;
+        }
+    };
+    log::info!("wifi: AP-mode scan saw {} ap(s)", aps.len());
+    for ap in &aps {
+        for s in &saved {
+            if ap.ssid.as_str() == s.ssid {
+                let rssi: i32 = ap.signal_strength as i32;
+                let ssid = &s.ssid;
+                log::info!("wifi: saved SSID {ssid} visible at rssi {rssi}");
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Permanent AP mode used when no networks are configured at all.
