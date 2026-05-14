@@ -564,9 +564,24 @@ fn try_connect_sta(wifi: &mut BlockingWifi<EspWifi<'static>>, creds: &WifiCreds)
 fn wait_for_ip(wifi: &BlockingWifi<EspWifi<'static>>, secs: u8) -> Result<()> {
     for _ in 0..secs {
         if wifi.is_connected().unwrap_or(false) {
-            // Give DHCP a moment.
-            thread::sleep(Duration::from_secs(1));
-            return Ok(());
+            // Association is up — but we also need DHCP to land,
+            // otherwise we'll "connect" with ip=0.0.0.0 and stay
+            // unreachable indefinitely. Wait for a non-zero IP for
+            // up to the rest of the budget, polling every 500 ms.
+            // Without this check, today's pattern was: reconnect →
+            // association OK → DHCP DISCOVER goes out but no
+            // response comes back fast enough → we return Ok →
+            // run_connected sees is_connected==true → loops forever
+            // with no IP, no traffic, no way out.
+            for _ in 0..10 {
+                if let Ok(info) = wifi.wifi().sta_netif().get_ip_info() {
+                    if info.ip.octets() != [0, 0, 0, 0] {
+                        return Ok(());
+                    }
+                }
+                thread::sleep(Duration::from_millis(500));
+            }
+            return Err(anyhow::anyhow!("DHCP timed out"));
         }
         thread::sleep(Duration::from_secs(1));
     }
