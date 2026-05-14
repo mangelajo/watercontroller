@@ -552,13 +552,13 @@ fn try_connect_sta(wifi: &mut BlockingWifi<EspWifi<'static>>, creds: &WifiCreds)
     wifi.set_configuration(&cfg)?;
     wifi.start()?;
     wifi.connect()?;
-    // Wait for IP. Failure to acquire IP within timeout = treat as failed connect.
-    let _ = wait_for_ip(wifi, STA_CONNECT_TIMEOUT_S);
-    if wifi.is_connected()? {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!("connect timed out"))
-    }
+    // Wait for IP — `wait_for_ip` returns Err on DHCP timeout, which
+    // we MUST propagate. Previously this line dropped the error with
+    // `let _ = …` and then just checked `wifi.is_connected()` (=
+    // association), causing the reconnect to claim success at
+    // ip=0.0.0.0 and the supervisor to loop forever with no L3.
+    wait_for_ip(wifi, STA_CONNECT_TIMEOUT_S)?;
+    Ok(())
 }
 
 fn wait_for_ip(wifi: &BlockingWifi<EspWifi<'static>>, secs: u8) -> Result<()> {
