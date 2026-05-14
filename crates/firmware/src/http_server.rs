@@ -162,12 +162,25 @@ pub fn spawn(
     http_cfg.http_port = port;
     http_cfg.stack_size = HTTP_STACK;
     http_cfg.max_uri_handlers = 64;
+    // Default is 7; we run with a WS log subscriber + 2 captive-portal
+    // probes from each new browser + the SPA's parallel asset fetches +
+    // a periodic healthcheck. Observed wedge: all 7 occupied in
+    // CLOSE_WAIT, plain-HTTP accept stops responding (HTTPS still
+    // works because it has its own pool). 8 leaves margin; the cost
+    // is ~1 KiB of internal DRAM per slot.
+    http_cfg.max_open_sockets = 8;
     // Shorter session timeout (default is 1200s = 20 min). Long-lived
     // WS sessions that disconnect ungracefully leave dangling
     // `EspHttpWsDetachedSender` handles in our fanout list. Reaping
     // them every 60s narrows the use-after-free window seen on
     // pthread_cond_wait during fanout sends.
     http_cfg.session_timeout = Duration::from_secs(60);
+    // Aggressive lru_purge: when accepting a new connection would
+    // exceed max_open_sockets, drop the least-recently-used existing
+    // session instead of refusing. This is the actual unstuck-er
+    // for the wedge — a stuck CLOSE_WAIT socket gets evicted by the
+    // next incoming request rather than blocking accept forever.
+    http_cfg.lru_purge_enable = true;
     let mut http = EspHttpServer::new(&http_cfg)?;
     register_handlers(&mut http, app.clone(), nvs.clone(), wifi.clone(), ws_senders.clone())?;
     log::info!("http: listening on :{port}");
@@ -190,6 +203,12 @@ pub fn spawn(
         tls_cfg.max_open_sockets = 4;
         tls_cfg.max_uri_handlers = 64;
         tls_cfg.session_timeout = Duration::from_secs(60);
+        // LRU-purge stuck sessions on accept — same rationale as the
+        // plain HTTP server: a TLS handshake that aborts at the wrong
+        // moment can leave the IDF httpd_ssl pool with a CLOSE_WAIT
+        // entry that nothing reaps. Without lru_purge, accept blocks
+        // until session_timeout (60 s) fires.
+        tls_cfg.lru_purge_enable = true;
         // The plain server already grabbed the default ctrl_port (32768).
         // esp_https_server uses ctrl_port for an internal signaling
         // socket; running two servers in the same process requires two
