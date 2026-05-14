@@ -537,24 +537,20 @@ fn try_connect_sta(wifi: &mut BlockingWifi<EspWifi<'static>>, creds: &WifiCreds)
         scan_method: ScanMethod::CompleteScan(esp_idf_svc::wifi::ScanSortMethod::Signal),
         ..Default::default()
     });
-    // If the driver is already started (we're reconnecting after a
-    // probe-detected outage, not booting fresh), don't call start()
-    // again — esp-idf v5.3 panics in pthread_mutex_unlock when
-    // start is called on an already-started driver. EXCVADDR=0x3
-    // null-deref, caught today after the gateway-probe-induced
-    // reconnect cycle. Disconnect first so set_configuration takes
-    // effect, then reconnect on the live driver.
-    let already_started = wifi.is_started().unwrap_or(false);
-    if already_started {
-        // Disconnect is best-effort: if we're already disconnected
-        // (e.g. AP dropped us) this errors with NotStarted-equivalent
-        // — ignore.
-        let _ = wifi.disconnect();
+    // IDF-canonical lifecycle: stop → set_configuration → start →
+    // connect. Skipping the stop on a running driver causes panics:
+    //   * On STA→STA reconnect: pthread_mutex_unlock null deref
+    //     inside BlockingWifi::start (EXCVADDR=0x3).
+    //   * On AP→STA mode switch: ieee80211_hostap_attach null
+    //     deref inside wifi_set_mode_process.
+    // Stop is safe to call when not started (returns error we ignore);
+    // it also handles the "started in a different mode" case which
+    // set_configuration alone cannot.
+    if wifi.is_started().unwrap_or(false) {
+        let _ = wifi.stop();
     }
     wifi.set_configuration(&cfg)?;
-    if !already_started {
-        wifi.start()?;
-    }
+    wifi.start()?;
     wifi.connect()?;
     // Wait for IP. Failure to acquire IP within timeout = treat as failed connect.
     let _ = wait_for_ip(wifi, STA_CONNECT_TIMEOUT_S);
@@ -596,6 +592,16 @@ fn start_ap(
         max_connections: 4,
         ..Default::default()
     });
+    // Stop the driver before set_configuration when we may be
+    // switching modes (STA → AP). The IDF driver panics in
+    // `wifi_set_mode_process → wifi_softap_start →
+    // ieee80211_hostap_attach` (null deref) if you push a new mode
+    // onto a running driver. Decoded today after a probe-induced
+    // STA reconnect failed and we fell into AP fallback. Stop is
+    // safe to call when not started (returns an error we ignore).
+    if wifi.is_started().unwrap_or(false) {
+        let _ = wifi.stop();
+    }
     wifi.set_configuration(&cfg)?;
     wifi.start()?;
     Ok(())
