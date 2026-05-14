@@ -31,9 +31,36 @@ where
             log::warn!("esp_pthread_set_cfg failed for {name:?}");
         }
     }
+    let display_name = name.to_string_lossy().into_owned();
+    let probe_name = display_name.clone();
     let h = std::thread::Builder::new()
-        .name(name.to_string_lossy().into_owned())
-        .spawn(f)
+        .name(display_name)
+        // CRUCIAL: pass stack_size through std::thread::Builder too,
+        // not just esp_pthread_set_cfg. Rust's std calls
+        // pthread_attr_setstacksize internally with its own default
+        // (~10 KiB on this target) AFTER our esp_pthread_set_cfg,
+        // silently clobbering the size we wanted. Tasks created via
+        // spawn_named were getting ~10 KiB regardless of the cfg.
+        // The bug was invisible because `cfg.thread_name` does
+        // survive (different attr), and HWM is reported in words —
+        // so a task with 912 B free was logged as "228 free" and
+        // looked benign.
+        .stack_size(stack_size)
+        .spawn(move || {
+            // One-shot stack-size probe at task entry. On ESP-IDF
+            // (v5.3, xtensa-esp32) `uxTaskGetStackHighWaterMark`
+            // returns BYTES, not StackType_t words — confirmed
+            // empirically: at task entry, free ≈ stack_size for
+            // every configured size. (`/api/diag`'s
+            // stack_min_free_bytes field is therefore correct as-is.)
+            let initial_free_bytes = unsafe {
+                esp_idf_svc::sys::uxTaskGetStackHighWaterMark(std::ptr::null_mut())
+            } as usize;
+            log::info!(
+                "task {probe_name}: configured={stack_size}B, initial HWM free={initial_free_bytes}B"
+            );
+            f()
+        })
         .ok();
     // Restore default cfg so subsequent pthread_creates from this thread
     // (e.g. IDF subsystems lazily spinning up worker pthreads) don't inherit
