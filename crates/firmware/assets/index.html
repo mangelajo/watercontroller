@@ -1387,7 +1387,69 @@
         renderWebhooks();
       });
     });
+    // Wire preset dropdown — applies the kind's body template +
+    // suggested headers when the user picks one. Tracks which body
+    // is currently a known preset (so re-picking the SAME kind is a
+    // no-op, and switching FROM a customised body asks before
+    // overwriting).
+    root.querySelectorAll("[data-wh-kind]").forEach(sel => {
+      sel.addEventListener("change", (ev) => {
+        const i = +ev.target.dataset.whKind;
+        const newKind = ev.target.value;
+        const bodyEl = root.querySelector(`[data-wh-body="${i}"]`);
+        const headersEl = root.querySelector(`[data-wh-headers="${i}"]`);
+        const currentBody = bodyEl.value.trim();
+        const looksLikePreset = Object.values(WEBHOOK_PRESETS)
+          .some(p => p.body.trim() === currentBody) || currentBody === "";
+        if (!looksLikePreset) {
+          if (!confirm(`Replace your customised body template with the ${newKind} preset?`)) {
+            // Revert dropdown to the previous value.
+            ev.target.value = webhooks[i].kind || "generic";
+            return;
+          }
+        }
+        const preset = WEBHOOK_PRESETS[newKind] || WEBHOOK_PRESETS.generic;
+        bodyEl.value = preset.body;
+        // Only overwrite headers if they're empty — users tend to
+        // add their own (Authorization, etc.) which we don't want
+        // to clobber.
+        if (!headersEl.value.trim() && preset.headers) {
+          headersEl.value = preset.headers;
+        }
+      });
+    });
   }
+  // Per-kind defaults applied when the user picks a preset. Keep the
+  // body templates JSON-valid and use the variables documented above
+  // the tab header. Slack/Discord posters use their own JSON schema;
+  // the IDF HTTP client will set Content-Length and we default
+  // Content-Type to application/json if the user doesn't add one.
+  const WEBHOOK_PRESETS = {
+    generic: {
+      body: '{\n  "event": "{{event}}",\n  "label": "{{event_label}}",\n  "device": "{{device}}",\n  "ts": "{{iso_ts}}",\n  "uptime_s": "{{uptime_s}}",\n  "flow_lph": "{{flow_lph}}"\n}',
+      headers: "",
+    },
+    slack: {
+      // Slack incoming-webhook accepts a `text` field with optional
+      // `*bold*`/`_italic_`/`` `code` `` markdown.
+      body: '{"text":"💧 *{{event_label}}* on `{{device}}` ({{iso_ts}}) — flow `{{flow_lph}}` L/h"}',
+      headers: "",
+    },
+    discord: {
+      // Discord webhooks use `content`; up to 2000 chars; markdown
+      // similar to Slack but with `**bold**`.
+      body: '{"content":"💧 **{{event_label}}** on `{{device}}` ({{iso_ts}}) — flow `{{flow_lph}}` L/h"}',
+      headers: "",
+    },
+    home_assistant: {
+      // HA's webhook trigger receives the raw POST body. The fields
+      // you put here become attributes on the triggered automation
+      // (`trigger.json.event`, etc.). Use this URL shape on the HA
+      // side: http://<ha-host>:8123/api/webhook/<random-id>
+      body: '{\n  "event": "{{event}}",\n  "device": "{{device}}",\n  "ts": "{{iso_ts}}",\n  "flow_lph": "{{flow_lph}}"\n}',
+      headers: "",
+    },
+  };
   function collectWebhooksFromForm() {
     return webhooks.map((_w, i) => {
       const events = Array.from(document.querySelectorAll(`[data-wh-events="${i}"]:checked`))
@@ -1419,7 +1481,10 @@
       enabled: true, url: "", kind: "generic",
       events: ["flow_alarm.fire"],
       method: "POST", headers: [],
-      body_template: '{"event":"{{event}}","device":"{{device}}","flow_lph":"{{flow_lph}}","ts":"{{iso_ts}}"}',
+      // Match WEBHOOK_PRESETS.generic.body exactly so that picking a
+      // different kind right after Add doesn't prompt to confirm
+      // overwrite — the current body is already a known preset.
+      body_template: WEBHOOK_PRESETS.generic.body,
     });
     renderWebhooks();
   });

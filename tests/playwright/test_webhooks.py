@@ -308,6 +308,55 @@ def test_ui_add_and_save_webhook_persists(host_url, page, mock_server, on_real_d
     assert "ui-test" in saved[0]["body_template"]
 
 
+def test_ui_preset_dropdown_updates_body_template(host_url, page, on_real_device):
+    """Picking a preset from the kind dropdown should replace the
+    body template with the preset's defaults. Confirm dialog only
+    fires when the current body is already customised — for an
+    empty/default body the swap is automatic."""
+    if on_real_device:
+        pytest.skip("real device may have user-configured webhooks; UI test mutates state")
+    # Clear + open the tab.
+    page.request.put(
+        f"{host_url}/api/config/webhooks",
+        data="[]",
+        headers={"Content-Type": "application/json"},
+    )
+    page.goto(host_url)
+    page.locator('nav.tabs button[data-tab="webhooks"]').click()
+    page.locator("#webhooks-add").click()
+
+    body_el = page.locator('textarea[data-wh-body="0"]')
+    kind_sel = page.locator('select[data-wh-kind="0"]')
+
+    # NOTE: for <textarea> the live JS-set value lives on the `.value`
+    # property, not textContent — so `to_have_value` is what we want,
+    # NOT `to_contain_text` (which reads textContent and stays on the
+    # initial HTML attribute regardless of JS edits).
+    from playwright.sync_api import expect
+
+    # The Add button installs the generic preset; verify before
+    # changing kind so a slow render can't race.
+    expect(body_el).to_have_value(__import__("re").compile(r"event_label"))
+
+    # Pick Slack — no confirm needed because the original body is
+    # a known preset.
+    kind_sel.select_option("slack")
+    expect(body_el).to_have_value(__import__("re").compile(r'"text"'))
+    # Slack body has no uptime_s placeholder.
+    assert "uptime_s" not in body_el.input_value()
+
+    # Discord swap
+    kind_sel.select_option("discord")
+    expect(body_el).to_have_value(__import__("re").compile(r'"content"'))
+
+    # Customise the body, then switching presets should prompt
+    # before overwriting. Auto-accept the confirm.
+    body_el.fill('{"custom":"do-not-lose-this"}')
+    page.on("dialog", lambda d: d.accept())
+    kind_sel.select_option("generic")
+    expect(body_el).to_have_value(__import__("re").compile(r"event_label"))
+
+
 def test_ui_test_fire_triggers_dispatch(host_url, page, mock_server, on_real_device):
     """Hitting the Test-fire button with a configured webhook causes
     the mock server to receive the rendered body."""
