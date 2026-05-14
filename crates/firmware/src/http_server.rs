@@ -14,6 +14,17 @@ use esp_idf_svc::sys::EspError;
 use esp_idf_svc::ws::FrameType;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// Hard cap on simultaneous WS log subscribers. Above this, oldest
+/// entry is evicted on new connect. Keeps internal DRAM pressure
+/// bounded even if SPA tabs leak DetachedSender entries on each
+/// reload (which the IDF httpd_ws layer does — see fanout comments).
+const WS_SENDER_CAP: usize = 4;
+/// Hard age-out for any WS sender — after this, the fanout drops it
+/// regardless of whether `is_closed()` says it's still alive.
+/// Bounds the impact of the IDF use-after-free race + matches the
+/// 60 s session_timeout we set on the httpd configs.
+const WS_SENDER_MAX_AGE: Duration = Duration::from_secs(120);
 use watercontroller_core::api::{routes, ApiError, CommandOutcome, ConfigUpdate, SwitchCommand};
 use watercontroller_core::app::App;
 use watercontroller_core::config::{
@@ -129,9 +140,18 @@ pub fn spawn(
     cert_pem: &str,
     key_pem: &str,
 ) -> Result<ServerHandles> {
-    // Shared WS-fanout sender list — populated by both servers' WS handlers,
-    // drained by a single fanout thread spawned at the end of this fn.
-    let ws_senders: Arc<Mutex<Vec<EspHttpWsDetachedSender>>> = Arc::new(Mutex::new(Vec::new()));
+    // Shared WS-fanout sender list. Each entry carries the wall-clock
+    // age (Instant of insertion) so the fanout can age-out stale
+    // senders even when `is_closed()` lies. Capped at WS_SENDER_CAP —
+    // if the user opens too many SPA log tabs the oldest get evicted
+    // rather than the list growing unbounded. Both protections
+    // matter: the IDF httpd_ws layer has a use-after-free race on
+    // session teardown that lets DetachedSenders linger indefinitely;
+    // without aging or capping, every connect leaks one slot + the
+    // mbedTLS state it pins.
+    use std::time::Instant;
+    let ws_senders: Arc<Mutex<Vec<(EspHttpWsDetachedSender, Instant)>>> =
+        Arc::new(Mutex::new(Vec::new()));
 
     // Plain HTTP on `port`. max_uri_handlers default is 32 — we register
     // ~34 routes (8 captive-portal probes + 9 per-section pairs + 8 base
@@ -212,7 +232,7 @@ fn register_handlers(
     app: App,
     nvs: Arc<dyn NvsStore>,
     wifi: Arc<dyn watercontroller_core::traits::Wifi>,
-    ws_senders: Arc<Mutex<Vec<EspHttpWsDetachedSender>>>,
+    ws_senders: Arc<Mutex<Vec<(EspHttpWsDetachedSender, std::time::Instant)>>>,
 ) -> Result<()> {
 
     server.fn_handler::<EspIOError, _>("/", Method::Get, |req| {
@@ -504,7 +524,17 @@ fn register_handlers(
                     }
                 }
                 if let Ok(sender) = conn.create_detached_sender() {
-                    senders.lock().unwrap().push(sender);
+                    let mut g = senders.lock().unwrap();
+                    // Cap the list: if we're at the limit, evict the
+                    // oldest entry (which is likely a stale leak
+                    // anyway — see the use-after-free note on
+                    // spawn_ws_fanout). FIFO eviction matches typical
+                    // "open new SPA tab, expect logs to flow there"
+                    // user behavior.
+                    while g.len() >= WS_SENDER_CAP {
+                        g.remove(0);
+                    }
+                    g.push((sender, std::time::Instant::now()));
                 }
             }
             Ok(())
@@ -865,9 +895,10 @@ where
 ///    sends, fewer chances to land in the race.
 /// 3. **Drop the senders lock between iterations** so a new WS
 ///    handler registering a sender doesn't block while we send.
-fn spawn_ws_fanout(senders: Arc<Mutex<Vec<EspHttpWsDetachedSender>>>) {
+fn spawn_ws_fanout(
+    senders: Arc<Mutex<Vec<(EspHttpWsDetachedSender, std::time::Instant)>>>,
+) {
     use std::time::Instant;
-    // Duration is imported at the module top.
     // Peak ~2 KiB (one log record + send call per iteration).
     crate::task_util::spawn_named(c"ws-log-fanout", 4 * 1024, move || {
             let Some(buf) = log_buffer::global() else {
@@ -876,40 +907,32 @@ fn spawn_ws_fanout(senders: Arc<Mutex<Vec<EspHttpWsDetachedSender>>>) {
             let (_id, rx) = buf.subscribe(256);
             let mut last_send = Instant::now() - Duration::from_secs(1);
             while let Ok(rec) = rx.recv() {
-                // Coalesce bursts: drop records that arrive within the
-                // rate-limit window. The buffer keeps the recent 200
-                // records, so clients see history on connect.
                 if last_send.elapsed() < Duration::from_millis(200) {
                     continue;
                 }
                 let line = rec.formatted();
                 let bytes = line.as_bytes();
-                // Sweep closed sessions first so we don't even touch
-                // them when sending. is_closed() lies sometimes (the
-                // race we're working around), but more often it's
-                // honest — every prune we can do up front narrows
-                // the window.
+                // Sweep: drop closed senders AND drop entries older
+                // than WS_SENDER_MAX_AGE. The age-out is the actual
+                // leak fix — without it, every WS connect that ends
+                // ungracefully grows the list forever and pins
+                // mbedTLS state inside the IDF session.
                 {
                     let mut guard = senders.lock().unwrap();
-                    guard.retain_mut(|s: &mut EspHttpWsDetachedSender| !s.is_closed());
+                    guard.retain_mut(|(s, t)| {
+                        !s.is_closed() && t.elapsed() < WS_SENDER_MAX_AGE
+                    });
                 }
-                // Drop the lock between sends so handlers can
-                // register a sender without queuing behind us.
                 let n_senders = senders.lock().unwrap().len();
                 for i in 0..n_senders {
-                    // Re-lock per send; if the list shrunk (handler
-                    // dropped a closed sender), bail.
                     let mut guard = senders.lock().unwrap();
                     if i >= guard.len() {
                         break;
                     }
-                    if guard[i].is_closed() {
+                    if guard[i].0.is_closed() {
                         continue;
                     }
-                    if guard[i].send(FrameType::Text(false), bytes).is_err() {
-                        // Mark for removal — actually drop on next
-                        // iteration's sweep.
-                    }
+                    let _ = guard[i].0.send(FrameType::Text(false), bytes);
                 }
                 last_send = Instant::now();
             }

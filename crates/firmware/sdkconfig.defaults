@@ -89,6 +89,16 @@ CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
 CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
 
+# Route mbedTLS allocations to PSRAM (default was INTERNAL).
+# Each TLS handshake allocates ~16-30 KiB across multiple chunks;
+# under load these chunks fragment internal DRAM and eventually
+# esp_tls_create_server_session fails with 0x7f00 (TLS init OOM).
+# On PSRAM-equipped boards we have 4 MiB of contiguous external
+# RAM — TLS context lives happily there at ~2-3x slower access.
+# On a no-PSRAM module this fails to set and the allocator falls
+# back to internal automatically (CONFIG_SPIRAM_IGNORE_NOTFOUND=y).
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
 # TLS session resumption on the server. When a browser reconnects within
 # the ticket lifetime it can skip the full ECDH handshake (~12 KiB peak
 # transient alloc) and resume using the cached session keys. Single biggest
