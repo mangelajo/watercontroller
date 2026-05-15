@@ -66,6 +66,10 @@ use watercontroller_core::{
     state::WaterControlState,
 };
 
+/// Live broker-connection flag, read by the status snapshot updater so
+/// the SPA dashboard can show the MQTT link state.
+pub static MQTT_UP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 const MQTT_HOST: &str = env!("MQTT_HOST");
 const MQTT_PORT: &str = env!("MQTT_PORT");
 const MQTT_USER: &str = env!("MQTT_USER");
@@ -93,6 +97,7 @@ pub async fn mqtt_task(app: App, stack: Stack<'static>) {
         if let Err(e) = run_session(&app, stack, endpoint).await {
             println!("mqtt: session ended ({:?}), reconnecting in 5 s", e);
         }
+        MQTT_UP.store(false, core::sync::atomic::Ordering::Relaxed);
         Timer::after(Duration::from_secs(5)).await;
     }
 }
@@ -139,6 +144,7 @@ async fn run_session(
     );
 
     client.connect_to_broker().await?;
+    MQTT_UP.store(true, core::sync::atomic::Ordering::Relaxed);
     println!("mqtt: connected to broker");
 
     // ----- on-connect: HA discovery + availability + subscribe ------

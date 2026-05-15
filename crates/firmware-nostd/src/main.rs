@@ -18,8 +18,8 @@
 #![no_main]
 #![feature(impl_trait_in_assoc_type)]
 // picoserve's router builds a deeply-nested generic type; the default
-// limit overflows once we chain GET+PUT on a route.
-#![recursion_limit = "256"]
+// limit overflows well before all the API routes are chained.
+#![recursion_limit = "512"]
 
 extern crate alloc;
 
@@ -28,6 +28,7 @@ mod mqtt;
 mod nvs;
 mod ota;
 mod sntp;
+mod webapi;
 mod webhook;
 
 use alloc::{string::String, sync::Arc};
@@ -53,14 +54,13 @@ use picoserve::{
     extract::State,
     io::Write,
     response::{Content, File},
-    routing::{get, get_service, post},
+    routing::{get, get_service, parse_path_segment, post},
     AppRouter, AppWithStateBuilder,
 };
 use watercontroller_core::{
-    api::{ConfigResponse, StatusResponse, SwitchCommand},
     app::App,
     config::Config,
-    traits::{Clock, NvsStore},
+    traits::{Clock, NvsStore, WifiState},
 };
 
 use crate::nvs::FlashKv;
@@ -134,62 +134,25 @@ pub(crate) struct AppState {
     pub(crate) flash_kv: Arc<FlashKv>,
 }
 
-fn diag_json() -> JsonStr {
-    JsonStr(alloc::format!(
-        r#"{{"uptime_s":{},"heap":{{"total_free_bytes":{},"total_used_bytes":{}}},"fw":"wc-nostd"}}"#,
-        uptime_secs(),
-        esp_alloc::HEAP.free(),
-        esp_alloc::HEAP.used(),
-    ))
-}
-
 struct AppProps;
+
+/// Path-segment capture type for the generic `/api` routes.
+type Seg = heapless::String<24>;
 
 impl AppWithStateBuilder for AppProps {
     type State = AppState;
     type PathRouter = impl picoserve::routing::PathRouter<AppState>;
 
+    /// Seven routes. picoserve's `call_path_router` recurses once per
+    /// route with the full nested router type in every frame, so a
+    /// route per endpoint overflows the executor poll stack — instead
+    /// the `/api` surface funnels through prefix routes that capture a
+    /// trailing segment and let `webapi` dispatch. picoserve only
+    /// supports one path parameter alongside `State`/body extractors,
+    /// hence one prefix route per two-level path.
     fn build_app(self) -> picoserve::Router<Self::PathRouter, AppState> {
         picoserve::Router::new()
             .route("/", get_service(File::html(SPA_HTML)))
-            .route("/api/diag", get(|| async { diag_json() }))
-            .route(
-                "/api/status",
-                get(|State(st): State<AppState>| async move {
-                    let snap = st.app.snapshot();
-                    JsonStr(serde_json::to_string(&StatusResponse { state: &snap }).unwrap_or_default())
-                }),
-            )
-            .route(
-                "/api/config",
-                get(|State(st): State<AppState>| async move {
-                    // Secrets (WiFi/MQTT passwords, TLS key, admin
-                    // token) are redacted — the SPA never needs them
-                    // back. The IDF firmware gated the full dump
-                    // behind ?all=1; the no_std build just always
-                    // redacts (the backup/restore flow can come later).
-                    let cfg = st.app.config();
-                    let safe = cfg.redact_secrets_for_api();
-                    JsonStr(serde_json::to_string(&ConfigResponse { config: &safe }).unwrap_or_default())
-                })
-                .put(|State(st): State<AppState>, body: alloc::vec::Vec<u8>| async move {
-                    match serde_json::from_slice::<Config>(&body) {
-                        Ok(cfg) => {
-                            // Persist first, then apply in-RAM.
-                            if let Err(e) = cfg.save(&*st.nvs) {
-                                return JsonStr(alloc::format!(
-                                    r#"{{"error":"nvs save failed: {:?}"}}"#, e
-                                ));
-                            }
-                            st.app.replace_config(cfg);
-                            JsonStr(String::from(r#"{"result":"ok"}"#))
-                        }
-                        Err(e) => JsonStr(alloc::format!(
-                            r#"{{"error":"bad config json: {}"}}"#, e
-                        )),
-                    }
-                }),
-            )
             .route(
                 "/api/ota",
                 post(|report: ota::OtaReport| async move {
@@ -203,17 +166,41 @@ impl AppWithStateBuilder for AppProps {
                 }),
             )
             .route(
-                "/api/switch",
-                post(|State(st): State<AppState>, body: alloc::vec::Vec<u8>| async move {
-                    match serde_json::from_slice::<SwitchCommand>(&body) {
-                        Ok(cmd) => {
-                            let outcome = st.app.switch_command(cmd);
-                            JsonStr(serde_json::to_string(&outcome).unwrap_or_default())
-                        }
-                        Err(e) => JsonStr(alloc::format!(
-                            r#"{{"error":"bad switch command: {}"}}"#, e
-                        )),
-                    }
+                ("/api", parse_path_segment::<Seg>()),
+                get(|seg: Seg, State(st): State<AppState>| async move {
+                    JsonStr(webapi::api_get(&seg, &st))
+                })
+                .put(|seg: Seg, State(st): State<AppState>, body: alloc::vec::Vec<u8>| async move {
+                    JsonStr(webapi::api_put(&seg, &st, &body))
+                })
+                .post(|seg: Seg, State(st): State<AppState>, body: alloc::vec::Vec<u8>| async move {
+                    JsonStr(webapi::api_post(&seg, &st, &body))
+                }),
+            )
+            .route(
+                ("/api/config", parse_path_segment::<Seg>()),
+                get(|sec: Seg, State(st): State<AppState>| async move {
+                    JsonStr(webapi::config_section_get(&sec, &st))
+                })
+                .put(|sec: Seg, State(st): State<AppState>, body: alloc::vec::Vec<u8>| async move {
+                    JsonStr(webapi::config_section_put(&sec, &st, &body))
+                }),
+            )
+            .route(
+                ("/api/wifi", parse_path_segment::<Seg>()),
+                get(|act: Seg| async move { JsonStr(webapi::wifi_get(&act)) })
+                    .post(|act: Seg| async move { JsonStr(webapi::wifi_post(&act)) }),
+            )
+            .route(
+                ("/api/alarm", parse_path_segment::<Seg>()),
+                post(|act: Seg, State(st): State<AppState>| async move {
+                    JsonStr(webapi::alarm_post(&act, &st))
+                }),
+            )
+            .route(
+                ("/api/webhooks", parse_path_segment::<Seg>()),
+                post(|act: Seg, State(st): State<AppState>, body: alloc::vec::Vec<u8>| async move {
+                    JsonStr(webapi::webhooks_post(&act, &st, &body))
                 }),
             )
     }
@@ -347,10 +334,14 @@ async fn main(spawner: Spawner) -> ! {
     let rng = Rng::new();
     let seed = ((rng.random() as u64) << 32) | rng.random() as u64;
 
+    // Socket slots: 4 web + 1 mqtt + 1 mdns persistent, plus DHCP, DNS,
+    // and the transient SNTP / webhook sockets. 8 was exactly the
+    // steady-state count and overflowed the moment SNTP synced — 14
+    // leaves clear headroom.
     let (stack, runner) = embassy_net::new(
         wifi_iface,
         net_cfg,
-        mk_static!(StackResources<8>, StackResources::<8>::new()),
+        mk_static!(StackResources<14>, StackResources::<14>::new()),
         seed,
     );
 
@@ -358,7 +349,7 @@ async fn main(spawner: Spawner) -> ! {
 
     spawner.spawn(connection_task(controller).unwrap());
     spawner.spawn(net_task(runner).unwrap());
-    spawner.spawn(heartbeat(stack).unwrap());
+    spawner.spawn(heartbeat(app.clone(), stack).unwrap());
     spawner.spawn(tick_task(app.clone(), valve_pins).unwrap());
     spawner.spawn(mqtt::mqtt_task(app.clone(), stack).unwrap());
     spawner.spawn(sntp::sntp_task(stack).unwrap());
@@ -395,19 +386,40 @@ async fn connection_task(mut controller: WifiController<'static>) {
 #[embassy_executor::task]
 async fn net_task(mut runner: Runner<'static, Interface<'static>>) { runner.run().await }
 
+/// Serial heartbeat + the periodic refresh of the device-state snapshot
+/// that `/api/status` (and thus the SPA dashboard) reads — uptime, fw
+/// version, free heap, WiFi link, MQTT link. Sensors/switches/alarm are
+/// kept current by `App` itself.
 #[embassy_executor::task]
-async fn heartbeat(stack: Stack<'static>) {
+async fn heartbeat(app: App, stack: Stack<'static>) {
     let mut secs = 0u64;
     loop {
         let free = esp_alloc::HEAP.free();
         let used = esp_alloc::HEAP.used();
-        match stack.config_v4() {
-            Some(c) => println!(
-                "alive uptime={}s heap_free={} heap_used={} ip={}",
-                secs, free, used, c.address.address()
-            ),
-            None => println!("alive uptime={}s heap_free={} heap_used={} ip=<none>", secs, free, used),
-        }
+        let wifi = match stack.config_v4() {
+            Some(c) => {
+                println!(
+                    "alive uptime={}s heap_free={} heap_used={} ip={}",
+                    secs, free, used, c.address.address()
+                );
+                Some(WifiState::Connected {
+                    ssid: String::from(SSID),
+                    ip: alloc::format!("{}", c.address.address()),
+                })
+            }
+            None => {
+                println!("alive uptime={}s heap_free={} heap_used={} ip=<none>", secs, free, used);
+                Some(WifiState::Disconnected)
+            }
+        };
+        app.update_state(|s| {
+            s.uptime_ms = secs * 1000;
+            s.firmware_version = String::from("wc-nostd");
+            s.diagnostics.free_heap_bytes = Some(free as u32);
+            s.network.wifi = wifi;
+            s.network.mqtt_connected =
+                mqtt::MQTT_UP.load(core::sync::atomic::Ordering::Relaxed);
+        });
         Timer::after(Duration::from_secs(10)).await;
         secs += 10;
     }

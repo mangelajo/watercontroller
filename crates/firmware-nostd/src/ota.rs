@@ -95,11 +95,17 @@ pub fn confirm_running(flash: &crate::nvs::FlashKv) {
     });
 }
 
+/// Ask `reboot_task` to reset the device shortly. Used by OTA (after a
+/// successful install) and by `POST /api/factory_reset`.
+pub fn request_reboot() {
+    OTA_REBOOT.signal(());
+}
+
 #[embassy_executor::task]
 pub async fn reboot_task() {
     OTA_REBOOT.wait().await;
-    println!("ota: image installed — rebooting into new slot");
-    // Let the HTTP 200 flush to the client before we drop the link.
+    println!("ota: reboot requested");
+    // Let the HTTP response flush to the client before we drop the link.
     Timer::after(Duration::from_millis(800)).await;
     esp_hal::system::software_reset();
 }
@@ -190,6 +196,6 @@ async fn write_image<R: picoserve::io::Read>(
         return OtaReport::err(alloc::format!("activate failed: {:?}", e));
     }
     println!("ota: {} bytes written + activated", written);
-    OTA_REBOOT.signal(());
+    request_reboot();
     OtaReport { ok: true, detail: alloc::format!("{} bytes, rebooting", written) }
 }
