@@ -21,3 +21,7 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# Local session state — Claude Code workspace + serial capture
+.claude/
+serial-logs/
