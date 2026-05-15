@@ -147,8 +147,17 @@ impl Default for WireguardConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HttpsConfig {
+    /// Master enable for the HTTPS listener on :443. When `false`, the device
+    /// serves HTTP only even if a cert + key are present. Provides an escape
+    /// hatch when something on the LAN hammers :443 with bad TLS handshakes:
+    /// each failed `mbedtls_ssl_handshake` allocates an ~12 KiB context out
+    /// of internal DRAM, and at sustained load the fragmentation starves
+    /// FreeRTOS task creation (we've observed `esp_mqtt_client_start` →
+    /// "Error create mqtt task" once enough internal DRAM has fragmented).
+    #[serde(default = "default_https_enabled")]
+    pub enabled: bool,
     /// PEM-encoded X.509 certificate for the on-device HTTPS server. If
     /// either this or `key_pem` is empty, only HTTP is served (port 80).
     /// Generate a self-signed cert + key with:
@@ -156,6 +165,13 @@ pub struct HttpsConfig {
     pub cert_pem: String,
     /// PEM-encoded private key paired with `cert_pem`.
     pub key_pem: String,
+}
+fn default_https_enabled() -> bool { true }
+
+impl Default for HttpsConfig {
+    fn default() -> Self {
+        Self { enabled: true, cert_pem: String::new(), key_pem: String::new() }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

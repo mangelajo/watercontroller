@@ -139,6 +139,7 @@ pub fn spawn(
     port: u16,
     cert_pem: &str,
     key_pem: &str,
+    https_enabled: bool,
 ) -> Result<ServerHandles> {
     // Shared WS-fanout sender list. Each entry carries the wall-clock
     // age (Instant of insertion) so the fanout can age-out stale
@@ -188,21 +189,26 @@ pub fn spawn(
     // HTTPS on :443 when both PEM blobs are present and the component is
     // compiled in.
     #[cfg(esp_idf_esp_https_server_enable)]
-    let https = if !cert_pem.is_empty() && !key_pem.is_empty() {
-        // TLS server's parallel-session cap. Browsers (Chromium) speculatively
-        // pre-connect with up to 6 TCP/TLS sessions per origin. 4 is the
-        // sweet spot for our heap budget: with cfg-persist removed and
-        // MBEDTLS_DYNAMIC_BUFFER on, we have ~28 KiB free / 16 KiB largest
-        // contiguous, comfortably above one TLS handshake's ~12 KiB peak.
-        // Explicit field assignment (see http_cfg comment for why we
-        // don't use struct-literal-with-spread).
+    let https = if https_enabled && !cert_pem.is_empty() && !key_pem.is_empty() {
+        // TLS server's parallel-session cap. Set to 2 (was 4): under a
+        // hostile-client handshake storm (we've seen something on the LAN
+        // probe :443 ~once per second with a bad cipher set, returning
+        // mbedtls_ssl_handshake -0x7780), each accepted-then-failed
+        // handshake allocates a ~12 KiB mbedtls context out of internal
+        // DRAM. With max_open_sockets=4 and a slow churn rate, the
+        // allocator fragments and FreeRTOS xTaskCreate eventually fails.
+        // Cap at 2 to bound peak internal-DRAM consumption from the TLS
+        // side; legitimate browser parallel fetches degrade to serial.
         let mut tls_cfg = esp_idf_svc::http::server::Configuration::default();
         tls_cfg.http_port = port;
         tls_cfg.https_port = 443;
         tls_cfg.stack_size = HTTPS_STACK;
-        tls_cfg.max_open_sockets = 4;
+        tls_cfg.max_open_sockets = 2;
         tls_cfg.max_uri_handlers = 64;
-        tls_cfg.session_timeout = Duration::from_secs(60);
+        // 15 s (was 60 s). Shorter timeout means a stuck/aborted handshake
+        // session is reclaimed sooner, freeing its mbedtls context for the
+        // next legitimate request.
+        tls_cfg.session_timeout = Duration::from_secs(15);
         // LRU-purge stuck sessions on accept — same rationale as the
         // plain HTTP server: a TLS handshake that aborts at the wrong
         // moment can leave the IDF httpd_ssl pool with a CLOSE_WAIT
@@ -228,7 +234,11 @@ pub fn spawn(
             }
         }
     } else {
-        log::info!("https: no cert/key configured, HTTP-only on :{port}");
+        if !https_enabled {
+            log::info!("https: disabled via config, HTTP-only on :{port}");
+        } else {
+            log::info!("https: no cert/key configured, HTTP-only on :{port}");
+        }
         None
     };
     #[cfg(not(esp_idf_esp_https_server_enable))]

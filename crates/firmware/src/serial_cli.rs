@@ -208,6 +208,22 @@ fn dispatch(cmd: &str, app: &App, nvs: &Arc<dyn NvsStore>, wifi: &Arc<dyn Wifi>)
             let cfg = app.config();
             println!(">> ap_ssid: {} (password set: {})", cfg.wifi.ap_ssid, !cfg.wifi.ap_password.is_empty());
         }
+        Some("https") => match it.next() {
+            Some(arg @ ("on" | "off")) => {
+                let mut cfg = (*app.config()).clone();
+                cfg.https.enabled = arg == "on";
+                if let Err(e) = cfg.save(&**nvs) {
+                    println!(">> https save failed: {e}");
+                    return;
+                }
+                app.replace_config(cfg);
+                println!(">> https.enabled = {}; reboot to apply (`reset`)", arg == "on");
+            }
+            _ => {
+                let cfg = app.config();
+                println!(">> https.enabled = {}  (usage: https <on|off>)", cfg.https.enabled);
+            }
+        },
         Some("reset") => {
             println!(">> rebooting...");
             std::thread::sleep(std::time::Duration::from_millis(200));
@@ -239,6 +255,7 @@ fn print_help() {
 >>   wifi connect                kick supervisor\n\
 >>   wifi scan                   discover nearby APs\n\
 >>   ap-info                     show AP fallback SSID\n\
+>>   https <on|off>              toggle HTTPS listener on :443 (reboot to apply)\n\
 >>   log <level>                 set log verbosity (off/error/warn/info/debug/trace)\n\
 >>   tasks                       tabulated task list (name/state/pri/stack free)\n\
 >>   mem                         heap stats (free/allocated/largest/min-ever)\n\

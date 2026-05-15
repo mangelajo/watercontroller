@@ -260,6 +260,7 @@ fn main() -> Result<()> {
         80,
         &config.https.cert_pem,
         &config.https.key_pem,
+        config.https.enabled,
     )?;
 
     // Config persistence used to be a periodic polling task; PUT /api/config
@@ -500,6 +501,27 @@ fn spawn_mqtt_supervisor(app: App, mqtt: Arc<EspMqtt>, wifi: Arc<WifiSupervisor>
                 if !mqtt.is_connected() {
                     let now = unsafe { esp_idf_svc::sys::esp_timer_get_time() } as u64 / 1000;
                     if now.saturating_sub(last_attempt) < backoff_ms {
+                        continue;
+                    }
+                    // Skip the connect attempt entirely when internal DRAM
+                    // is tight. `esp_mqtt_client_start` calls xTaskCreate
+                    // which pulls a ~3 KiB TCB + stack from internal DRAM
+                    // (FreeRTOS task control blocks can't live in PSRAM).
+                    // If the largest contiguous internal block is below
+                    // ~10 KiB we'll just fail with "Error create mqtt task",
+                    // potentially leaving a half-initialised event loop.
+                    // Wait for the next tick instead; the TLS storm or
+                    // whatever fragmented internal DRAM may have settled.
+                    let largest_internal = unsafe {
+                        esp_idf_svc::sys::heap_caps_get_largest_free_block(
+                            esp_idf_svc::sys::MALLOC_CAP_INTERNAL,
+                        )
+                    };
+                    if largest_internal < 12 * 1024 {
+                        log::warn!(
+                            "mqtt: skipping connect, internal DRAM tight ({largest_internal} B largest free)"
+                        );
+                        backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                         continue;
                     }
                     last_attempt = now;
