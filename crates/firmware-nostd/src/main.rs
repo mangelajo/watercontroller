@@ -70,8 +70,10 @@ macro_rules! mk_static {
     }};
 }
 
-const SSID: &str = env!("WC_WIFI_SSID");
-const PASSWORD: &str = env!("WC_WIFI_PASSWORD");
+// Credentials come from the workspace-root `.env` via build.rs — never
+// hard-coded here. `.env` is gitignored.
+const SSID: &str = env!("SSID");
+const PASSWORD: &str = env!("PASSWORD");
 
 const SPA_HTML: &str = include_str!("../../firmware/assets/index.html");
 
