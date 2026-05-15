@@ -37,8 +37,6 @@ embassy-net          = { version = "0.9", features = [
 embassy-sync         = "0.8"
 embassy-futures      = "0.1"
 
-# N5: picoserve serves /api/diag etc. N6+: esp-mbedtls (server TLS).
-# N7+: edge-mqtt / edge-mdns / reqwless. Added incrementally.
 picoserve            = { version = "0.18", features = ["embassy", "json", "log"] }
 serde                = { version = "1", default-features = false, features = ["derive"] }
 serde-json-core      = "0.6"
@@ -48,10 +46,16 @@ serde-json-core      = "0.6"
 # no std required.
 watercontroller-core = { path = "../core", default-features = false }
 
-# N6: TLS server via mbedtls-rs (Espressif's no_std mbedTLS wrapper —
-# uses HW SHA/AES on ESP32 via `EspAccel`, which goes through `unstable`
-# features of esp-hal).
-mbedtls-rs           = { git = "https://github.com/esp-rs/esp-mbedtls", rev = "177721027aae6e014e1cf922608eb9955d70d85b", default-features = false, features = ["esp32", "embassy-time", "log", "hook-timer", "hook-wall-clock"] }
+# Outbound TLS (mbedtls-rs) — OPTIONAL, behind the `tls` feature, off
+# by default. We dropped the *inbound* HTTPS server: a mbedtls server
+# session's ~16 KiB×2 SSL buffers don't fit in this ESP32-PICO-D4's
+# internal DRAM and esp-hal has no PSRAM driver for the D4 variant
+# (see N6 notes / README). But a *client* TLS session — one transient
+# outbound connection at a time, e.g. a webhook POST to Slack/HA over
+# HTTPS — is concurrency-controllable and worth keeping. Enable with
+# `--features tls` when the webhook dispatcher is ported. Building it
+# pulls in the mbedtls C sources (cmake + xtensa-esp32-elf-gcc).
+mbedtls-rs           = { git = "https://github.com/esp-rs/esp-mbedtls", rev = "177721027aae6e014e1cf922608eb9955d70d85b", default-features = false, features = ["esp32", "embassy-time", "log"], optional = true }
 
 # Cross-platform building blocks.
 log                  = "0.4"
@@ -61,6 +65,9 @@ static_cell          = "2"
 
 [features]
 default = []
+# Outbound (client) TLS for webhook delivery. Off by default — keeps
+# HTTP-only builds fast (no mbedtls C compile).
+tls = ["dep:mbedtls-rs"]
 
 # mbedtls-rs-sys depends on `esp-hal = "1"` from crates.io, but we use a
 # git pin (matching set of esp-radio/esp-rtos/etc). Without this patch,
