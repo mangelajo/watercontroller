@@ -48,6 +48,11 @@ serde-json-core      = "0.6"
 # no std required.
 watercontroller-core = { path = "../core", default-features = false }
 
+# N6: TLS server via mbedtls-rs (Espressif's no_std mbedTLS wrapper —
+# uses HW SHA/AES on ESP32 via `EspAccel`, which goes through `unstable`
+# features of esp-hal).
+mbedtls-rs           = { git = "https://github.com/esp-rs/esp-mbedtls", rev = "177721027aae6e014e1cf922608eb9955d70d85b", default-features = false, features = ["esp32", "embassy-time", "log"] }
+
 # Cross-platform building blocks.
 log                  = "0.4"
 heapless             = "0.8"
@@ -56,6 +61,21 @@ static_cell          = "2"
 
 [features]
 default = []
+
+# mbedtls-rs-sys depends on `esp-hal = "1"` from crates.io, but we use a
+# git pin (matching set of esp-radio/esp-rtos/etc). Without this patch,
+# Cargo links two copies of `esp-riscv-rt` and refuses to build.
+[patch.crates-io]
+esp-hal                = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442" }
+esp-radio              = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442" }
+esp-rtos               = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442" }
+esp-alloc              = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442" }
+esp-backtrace          = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442" }
+esp-println            = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442" }
+esp-storage            = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442" }
+esp-bootloader-esp-idf = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442" }
+esp-riscv-rt           = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442" }
+esp-metadata-generated = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442" }
 
 [profile.release]
 opt-level = "s"
