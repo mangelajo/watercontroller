@@ -238,3 +238,22 @@ across consecutive tests means you broke discipline somewhere.
 * **`make ota IP=<addr>`** for fast iteration on a connected device:
   ~15 s wall time vs ~25 s for full serial flash. Doesn't wipe
   otadata/NVS — use serial flash for clean-slate tests.
+
+* **OTA's final reboot can fail under internal-DRAM pressure.** The
+  upload itself doesn't allocate much, but the post-upload
+  `ota-reboot` task (2 KiB stack, spawned via `task_util::spawn_named`)
+  needs a contiguous chunk of internal DRAM. Under a TLS handshake
+  storm or a fragmented heap you'll see `spawn_named "ota-reboot"
+  failed: Not enough space (os error 12)` and `Failed to create task!`
+  on serial; the new firmware is in flash but unbooted. Workaround:
+  send `reset` over the serial CLI (or power-cycle). Root cause is
+  whatever fragmented internal DRAM in the first place; see "TLS
+  handshake storm" mitigations in `http_server.rs`.
+
+* **`pthread_mutex_unlock` panic in `try_connect_sta` (task #40).**
+  The crash is inside `esp_idf_svc::wifi::BlockingWifi`'s cond_var
+  lifecycle when we run the stop→set_config→start→connect cycle
+  rapidly under a DHCP-failing AP. The proper fix is dropping
+  `BlockingWifi` and driving `EspWifi` ourselves with our own event
+  handling; that's a large refactor and currently deferred because
+  a static-IP DHCP reservation eliminates the trigger.
