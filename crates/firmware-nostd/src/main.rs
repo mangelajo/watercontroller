@@ -1,24 +1,20 @@
-//! Watercontroller no_std firmware — N4 spike.
+//! Watercontroller no_std firmware — N5 spike.
 //!
-//! Goals: boot on ESP32-PICO, bring up WiFi STA, print uptime + heap
-//! stats every 10 s over UART. Once stable on the bench for an hour,
-//! N5 adds picoserve.
+//! Adds picoserve over the N4 boot+wifi base. Endpoints so far:
+//!   GET /            → "hello from no_std" (placeholder for embedded SPA)
+//!   GET /api/diag    → JSON with uptime + heap stats
+//!   GET /api/status  → minimal status (the healthcheck script polls this)
 //!
-//! Modelled on esp-hal v1.1.1's `examples/wifi/embassy_dhcp` — the
-//! canonical reference for the current esp-rtos + esp-radio API
-//! shape.
-//!
-//! Single-core only by choice: esp-radio has an open bug
-//! (esp-rs/esp-wifi-sys#412) where any embassy task on the second
-//! core can corrupt WiFi state. Embassy's default executor is
-//! single-core so we just don't reach for the multicore spawner.
+//! Each connection runs in its own embassy task from a pool of 4 workers.
+//! Modelled on picoserve's own examples/embassy/hello_world.
 
 #![no_std]
 #![no_main]
+#![feature(impl_trait_in_assoc_type)]
 
 use embassy_executor::Spawner;
 use embassy_net::{Runner, Stack, StackResources};
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_hal::{
@@ -29,11 +25,11 @@ use esp_println::println;
 use esp_radio::wifi::{
     sta::StationConfig, Config as WifiConfig, ControllerConfig, Interface, WifiController,
 };
+use picoserve::{response::Json, routing::get, AppBuilder, AppRouter};
+use serde::Serialize;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-/// Macro from the upstream example — wraps `StaticCell` for cases
-/// where the value is built at runtime but needs `'static` lifetime.
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
@@ -42,26 +38,111 @@ macro_rules! mk_static {
     }};
 }
 
-// Compile-time WiFi credentials. Real config eventually comes from a
-// sequential-storage KV store; the spike just wants to reach an IP.
 const SSID: &str = env!("WC_WIFI_SSID");
 const PASSWORD: &str = env!("WC_WIFI_PASSWORD");
+
+/// Boot wall-clock anchor in microseconds-since-cpu-start. Set once at
+/// start; subtracted from `Instant::now()` to compute uptime. We need
+/// this so the JSON endpoint reports uptime, the way the healthcheck
+/// script greps for it.
+static mut BOOT_INSTANT: Option<Instant> = None;
+
+fn uptime_secs() -> u64 {
+    let boot = unsafe { BOOT_INSTANT };
+    match boot {
+        Some(t) => (Instant::now() - t).as_secs(),
+        None => 0,
+    }
+}
+
+#[derive(Serialize)]
+struct Heap {
+    total_free_bytes: usize,
+    total_used_bytes: usize,
+}
+
+#[derive(Serialize)]
+struct Diag {
+    uptime_s: u64,
+    heap: Heap,
+    fw: &'static str,
+}
+
+#[derive(Serialize)]
+struct Status {
+    uptime_ms: u64,
+    fw: &'static str,
+}
+
+struct AppProps;
+
+impl AppBuilder for AppProps {
+    type PathRouter = impl picoserve::routing::PathRouter;
+
+    fn build_app(self) -> picoserve::Router<Self::PathRouter> {
+        picoserve::Router::new()
+            .route("/", get(|| async { "hello from no_std watercontroller\n" }))
+            .route(
+                "/api/status",
+                get(|| async {
+                    Json(Status {
+                        uptime_ms: uptime_secs() * 1000,
+                        fw: "wc-nostd-N5",
+                    })
+                }),
+            )
+            .route(
+                "/api/diag",
+                get(|| async {
+                    Json(Diag {
+                        uptime_s: uptime_secs(),
+                        heap: Heap {
+                            total_free_bytes: esp_alloc::HEAP.free(),
+                            total_used_bytes: esp_alloc::HEAP.used(),
+                        },
+                        fw: "wc-nostd-N5",
+                    })
+                }),
+            )
+    }
+}
+
+static SERVER_CONFIG: picoserve::Config = picoserve::Config::const_default().keep_connection_alive();
+
+const WEB_TASK_POOL_SIZE: usize = 4;
+
+#[embassy_executor::task(pool_size = WEB_TASK_POOL_SIZE)]
+async fn web_task(
+    task_id: usize,
+    stack: Stack<'static>,
+    app: &'static AppRouter<AppProps>,
+) -> ! {
+    let mut tcp_rx = [0u8; 1024];
+    let mut tcp_tx = [0u8; 1024];
+    let mut http_buf = [0u8; 2048];
+    picoserve::Server::new(app, &SERVER_CONFIG, &mut http_buf)
+        .listen_and_serve(task_id, stack, 80, &mut tcp_rx, &mut tcp_tx)
+        .await
+        .into_never()
+}
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::_80MHz));
 
-    // 64 KiB reclaimed heap + 36 KiB internal — matches the upstream
-    // example's split; gives esp-radio its breathing room.
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
     esp_alloc::heap_allocator!(size: 36 * 1024);
+
+    unsafe {
+        BOOT_INSTANT = Some(Instant::now());
+    }
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
-    println!("wc-nostd: boot");
+    println!("wc-nostd N5: boot");
 
     let station_cfg = WifiConfig::Station(
         StationConfig::default()
@@ -84,17 +165,19 @@ async fn main(spawner: Spawner) -> ! {
     let (stack, runner) = embassy_net::new(
         wifi_iface,
         net_cfg,
-        mk_static!(StackResources<6>, StackResources::<6>::new()),
+        mk_static!(StackResources<8>, StackResources::<8>::new()),
         seed,
     );
 
-    // embassy 0.10 task fns return Result<SpawnToken, _>; unwrap, then
-    // hand to Spawner::spawn which is infallible.
+    let app = mk_static!(AppRouter<AppProps>, AppProps.build_app());
+
     spawner.spawn(connection_task(controller).unwrap());
     spawner.spawn(net_task(runner).unwrap());
     spawner.spawn(heartbeat(stack).unwrap());
+    for id in 0..WEB_TASK_POOL_SIZE {
+        spawner.spawn(web_task(id, stack, app).unwrap());
+    }
 
-    // Idle; supervisor tasks do the work.
     loop {
         Timer::after(Duration::from_secs(60)).await;
     }
@@ -121,9 +204,6 @@ async fn net_task(mut runner: Runner<'static, Interface<'static>>) {
     runner.run().await
 }
 
-/// Heartbeat: 10 s cadence, prints uptime + heap free + IP. The
-/// closest equivalent of our IDF firmware's `alive` line — what the
-/// healthcheck script greps for over serial.
 #[embassy_executor::task]
 async fn heartbeat(stack: Stack<'static>) {
     let mut secs = 0u64;
