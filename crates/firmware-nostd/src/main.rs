@@ -23,8 +23,10 @@
 
 extern crate alloc;
 
+mod mdns;
 mod mqtt;
 mod nvs;
+mod ota;
 mod sntp;
 mod webhook;
 
@@ -122,12 +124,14 @@ impl Content for JsonStr {
     }
 }
 
-/// Router state: the domain App + a handle to the NVS store (so the
-/// config-write path can persist). Both are cheap to clone (Arc).
+/// Router state: the domain App, a handle to the NVS store (so the
+/// config-write path can persist), and the concrete `FlashKv` (the OTA
+/// handler borrows its raw flash). All cheap to clone (Arc).
 #[derive(Clone)]
-struct AppState {
-    app: App,
-    nvs: Arc<dyn NvsStore>,
+pub(crate) struct AppState {
+    pub(crate) app: App,
+    pub(crate) nvs: Arc<dyn NvsStore>,
+    pub(crate) flash_kv: Arc<FlashKv>,
 }
 
 fn diag_json() -> JsonStr {
@@ -187,6 +191,18 @@ impl AppWithStateBuilder for AppProps {
                 }),
             )
             .route(
+                "/api/ota",
+                post(|report: ota::OtaReport| async move {
+                    if report.ok {
+                        JsonStr(alloc::format!(
+                            r#"{{"result":"ok","detail":"{}"}}"#, report.detail
+                        ))
+                    } else {
+                        JsonStr(alloc::format!(r#"{{"error":"{}"}}"#, report.detail))
+                    }
+                }),
+            )
+            .route(
                 "/api/switch",
                 post(|State(st): State<AppState>, body: alloc::vec::Vec<u8>| async move {
                     match serde_json::from_slice::<SwitchCommand>(&body) {
@@ -203,7 +219,17 @@ impl AppWithStateBuilder for AppProps {
     }
 }
 
-static SERVER_CONFIG: picoserve::Config = picoserve::Config::const_default().keep_connection_alive();
+// `read_request` is bumped well above the 3 s default: the OTA handler
+// interleaves ~40 ms flash-sector erase/writes with body reads, which
+// blocks the single-threaded executor in bursts. 30 s comfortably
+// absorbs that without the connection being aborted mid-upload.
+static SERVER_CONFIG: picoserve::Config = picoserve::Config::new(picoserve::Timeouts {
+    start_read_request: Duration::from_secs(5),
+    persistent_start_read_request: Duration::from_secs(1),
+    read_request: Duration::from_secs(30),
+    write: Duration::from_secs(10),
+})
+.keep_connection_alive();
 
 const WEB_TASK_POOL_SIZE: usize = 4;
 
@@ -214,7 +240,9 @@ async fn web_task(
     router: &'static AppRouter<AppProps>,
     state: &'static AppState,
 ) -> ! {
-    let mut tcp_rx = [0u8; 1024];
+    // RX is generous (4 KiB) so a streamed OTA upload keeps a healthy
+    // TCP window open across the handler's flash-write stalls.
+    let mut tcp_rx = [0u8; 4096];
     let mut tcp_tx = [0u8; 1024];
     let mut http_buf = [0u8; 2048];
     picoserve::Server::new(&router.shared().with_state(state), &SERVER_CONFIG, &mut http_buf)
@@ -275,9 +303,14 @@ async fn main(spawner: Spawner) -> ! {
     println!("wc-nostd: boot");
 
     // Flash-backed NVS. Config is restored from it (or compile-time
-    // defaults on a blank store / parse failure).
+    // defaults on a blank store / parse failure). The same `FlashKv`
+    // also lends its raw flash to the OTA writer.
     let flash = FlashStorage::new(peripherals.FLASH);
-    let nvs: Arc<dyn NvsStore> = Arc::new(FlashKv::new(flash));
+    let flash_kv = Arc::new(FlashKv::new(flash));
+    let nvs: Arc<dyn NvsStore> = flash_kv.clone();
+    // Confirm the running image so a rollback bootloader keeps it (and
+    // so a just-OTA'd slot is marked Valid).
+    ota::confirm_running(&flash_kv);
     let config = Config::load(&*nvs).unwrap_or_else(|_| {
         println!("nvs: no stored config, using defaults");
         Config::default()
@@ -297,7 +330,8 @@ async fn main(spawner: Spawner) -> ! {
         drain: Output::new(peripherals.GPIO25, Level::Low, oc),
     };
 
-    let state: &'static AppState = mk_static!(AppState, AppState { app: app.clone(), nvs });
+    let state: &'static AppState =
+        mk_static!(AppState, AppState { app: app.clone(), nvs, flash_kv });
 
     let station_cfg = WifiConfig::Station(
         StationConfig::default().with_ssid(SSID).with_password(PASSWORD.into()),
@@ -328,7 +362,9 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(tick_task(app.clone(), valve_pins).unwrap());
     spawner.spawn(mqtt::mqtt_task(app.clone(), stack).unwrap());
     spawner.spawn(sntp::sntp_task(stack).unwrap());
-    spawner.spawn(webhook::webhook_task(app, stack).unwrap());
+    spawner.spawn(webhook::webhook_task(app.clone(), stack).unwrap());
+    spawner.spawn(ota::reboot_task().unwrap());
+    spawner.spawn(mdns::mdns_task(stack, app).unwrap());
     for id in 0..WEB_TASK_POOL_SIZE {
         spawner.spawn(web_task(id, stack, router, state).unwrap());
     }

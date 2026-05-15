@@ -53,6 +53,16 @@ impl FlashKv {
         }
     }
 
+    /// Run `f` with exclusive access to the raw flash. The OTA path
+    /// needs to write the inactive app partition + flip otadata; flash
+    /// is a hardware singleton, so the NVS store owns it and lends it
+    /// out here. The lock is held only for the closure — the OTA
+    /// streamer takes it once per 4 KiB sector, never across an await,
+    /// so a concurrent config write just waits a few ms.
+    pub fn with_flash<R>(&self, f: impl FnOnce(&mut FlashStorage<'static>) -> R) -> R {
+        f(&mut self.flash.lock())
+    }
+
     /// Read + parse the flash region. Returns None on bad magic /
     /// version / corruption (treated as "empty store").
     fn load(flash: &mut FlashStorage<'static>) -> Option<BTreeMap<String, Vec<u8>>> {

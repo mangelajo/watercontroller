@@ -32,7 +32,7 @@ embassy-executor     = "0.10"
 embassy-time         = "0.5"
 embassy-net          = { version = "0.9", features = [
     "tcp", "udp", "dns", "dhcpv4",
-    "medium-ethernet", "proto-ipv4",
+    "medium-ethernet", "proto-ipv4", "multicast",
 ] }
 embassy-sync         = "0.8"
 embassy-futures      = "0.1"
