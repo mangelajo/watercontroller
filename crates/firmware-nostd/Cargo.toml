@@ -36,6 +36,15 @@ embassy-net          = { version = "0.9", features = [
 ] }
 embassy-sync         = "0.8"
 embassy-futures      = "0.1"
+# no_std MQTT 5 client. 0.3.x is the simple `MqttClient` API (the one
+# every esp-rs example uses); 0.5 reworked it into a heavier
+# Transport/BufferProvider model we don't need. 0.3 wants
+# embedded-io-async 0.6 while embassy-net is on 0.7 — bridged by a
+# thin shim in mqtt.rs (the async Read/Write fn signatures are
+# identical between the two; only the error type differs).
+rust-mqtt            = { version = "0.3", default-features = false }
+embedded-io-async-06 = { package = "embedded-io-async", version = "0.6" }
+embedded-io-async    = "0.7"
 
 picoserve            = { version = "0.18", features = ["embassy", "json", "log", "alloc"] }
 serde                = { version = "1", default-features = false, features = ["derive"] }

@@ -23,6 +23,7 @@
 
 extern crate alloc;
 
+mod mqtt;
 mod nvs;
 
 use alloc::{string::String, sync::Arc};
@@ -316,7 +317,8 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(connection_task(controller).unwrap());
     spawner.spawn(net_task(runner).unwrap());
     spawner.spawn(heartbeat(stack).unwrap());
-    spawner.spawn(tick_task(app, valve_pins).unwrap());
+    spawner.spawn(tick_task(app.clone(), valve_pins).unwrap());
+    spawner.spawn(mqtt::mqtt_task(app, stack).unwrap());
     for id in 0..WEB_TASK_POOL_SIZE {
         spawner.spawn(web_task(id, stack, router, state).unwrap());
     }
