@@ -38,6 +38,11 @@ pub struct Rule {
     pub days_of_week: Vec<u8>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Optional override for sprinkler activations: when set, the scheduled
+    /// turn-on auto-offs after this many seconds, regardless of the manual
+    /// auto-off configured on the switch. Ignored for `WaterControl` rules.
+    #[serde(default)]
+    pub duration_secs: Option<u32>,
 }
 
 fn default_minutes() -> Vec<u8> {
@@ -153,6 +158,7 @@ pub fn default_schedule() -> Schedule {
             minutes: vec![0],
             days_of_week: vec![],
             enabled: true,
+            duration_secs: None,
         },
         Rule {
             id: "riego_interior".into(),
@@ -161,6 +167,7 @@ pub fn default_schedule() -> Schedule {
             minutes: vec![30],
             days_of_week: vec![],
             enabled: true,
+            duration_secs: None,
         },
     ])
 }
