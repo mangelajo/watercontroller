@@ -3089,6 +3089,7 @@ dependencies = [
 name = "watercontroller-firmware-nostd"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "critical-section",
  "embassy-executor",
  "embassy-futures",
@@ -3109,7 +3110,7 @@ dependencies = [
  "picoserve",
  "sequential-storage",
  "serde",
- "serde-json-core",
+ "serde_json",
  "static_cell",
  "watercontroller-core",
 ]

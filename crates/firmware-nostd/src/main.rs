@@ -1,30 +1,25 @@
 //! Watercontroller no_std firmware.
 //!
-//! HTTP server on :80 via picoserve, backed by an embassy task pool.
-//! WiFi STA + DHCP via esp-radio + embassy-net.
+//! HTTP server on :80 via picoserve, serving the embedded SPA and the
+//! JSON API. WiFi STA + DHCP via esp-radio + embassy-net. Domain logic
+//! (state, schedule, switches, valve) comes from `watercontroller-core`
+//! — the same crate the IDF firmware and host build use.
 //!
-//! No HTTPS server: the ESP32-PICO-D4 has no esp-hal PSRAM support
-//! (the D4 PSRAM pinout isn't implemented — esp-hal panics "PSRAM is
-//! unsupported on this chip"), and a mbedtls server session's
-//! ~16 KiB×2 SSL buffers + RSA scratch don't fit in the ~69 KiB of
-//! free internal DRAM left after WiFi. HTTP-only on a trusted LAN is
-//! the accepted trade-off; inbound TLS returns when we move to an
-//! ESP32-S3 (PSRAM works there).
-//!
-//! Outbound TLS — for webhook calls to Slack/Discord/HA over HTTPS —
-//! is a separate matter: a single transient client session is
-//! controllable for concurrency and will be wired behind the `tls`
-//! Cargo feature when the webhook dispatcher is ported.
+//! No HTTPS server (the ESP32-PICO-D4 can't host mbedtls server-side —
+//! see README "no_std migration"). Outbound client TLS for webhooks is
+//! behind the `tls` feature.
 //!
 //! Single-core only by choice: esp-radio has an open bug
 //! (esp-rs/esp-wifi-sys#412) where an embassy task on the second core
-//! can corrupt WiFi state. Embassy's default executor is single-core.
+//! can corrupt WiFi state.
 
 #![no_std]
 #![no_main]
 #![feature(impl_trait_in_assoc_type)]
 
 extern crate alloc;
+
+use alloc::string::String;
 
 use embassy_executor::Spawner;
 use embassy_net::{Runner, Stack, StackResources};
@@ -39,8 +34,18 @@ use esp_println::println;
 use esp_radio::wifi::{
     sta::StationConfig, Config as WifiConfig, ControllerConfig, Interface, WifiController,
 };
-use picoserve::{response::Json, routing::get, AppBuilder, AppRouter};
-use serde::Serialize;
+use picoserve::{
+    io::Write,
+    response::{Content, File},
+    routing::{get, get_service},
+    AppRouter, AppWithStateBuilder,
+};
+use watercontroller_core::{
+    api::{ConfigResponse, StatusResponse},
+    app::App,
+    config::Config,
+    traits::Clock,
+};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -55,6 +60,15 @@ macro_rules! mk_static {
 const SSID: &str = env!("WC_WIFI_SSID");
 const PASSWORD: &str = env!("WC_WIFI_PASSWORD");
 
+/// Embedded SPA — same asset the IDF firmware bundles.
+const SPA_HTML: &str = include_str!("../../firmware/assets/index.html");
+
+/// Epoch baseline for the `Clock::now()` wall-clock until SNTP lands
+/// (N11). 2026-05-15T00:00:00Z. Schedule evaluation only needs
+/// *relative* correctness within a day for the cron matcher, and the
+/// firmware re-derives absolute time once SNTP syncs.
+const BASE_EPOCH_S: i64 = 1_778_976_000;
+
 static mut BOOT_INSTANT: Option<Instant> = None;
 
 fn uptime_secs() -> u64 {
@@ -63,46 +77,75 @@ fn uptime_secs() -> u64 {
         .unwrap_or(0)
 }
 
-#[derive(Serialize)]
-struct Heap {
-    total_free_bytes: usize,
-    total_used_bytes: usize,
+/// `Clock` backed by embassy's monotonic timer. Wall clock is a fixed
+/// baseline + uptime until SNTP; monotonic is exact.
+struct EmbassyClock;
+impl Clock for EmbassyClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(BASE_EPOCH_S + uptime_secs() as i64, 0)
+            .unwrap_or_default()
+    }
+    fn monotonic_ms(&self) -> u64 {
+        Instant::now().as_millis()
+    }
 }
-#[derive(Serialize)]
-struct Diag {
-    uptime_s: u64,
-    heap: Heap,
-    fw: &'static str,
+
+/// A pre-serialized JSON body. We serialize with `serde_json` (alloc)
+/// rather than picoserve's serde-json-core `Json` because the `Config`
+/// struct is large + deeply nested and serde-json-core's fixed-buffer
+/// serializer is easy to overflow. alloc-backed serialization has no
+/// such limit.
+struct JsonStr(String);
+
+impl Content for JsonStr {
+    fn content_type(&self) -> &'static str {
+        "application/json"
+    }
+    fn content_length(&self) -> usize {
+        self.0.len()
+    }
+    async fn write_content<W: Write>(self, mut w: W) -> Result<(), W::Error> {
+        w.write_all(self.0.as_bytes()).await
+    }
 }
-#[derive(Serialize)]
-struct Status {
-    uptime_ms: u64,
-    fw: &'static str,
+
+/// `/api/diag` — heap + uptime. no_std has no per-task HWM table the
+/// way FreeRTOS did, so this stays a lean object; the SPA's
+/// Diagnostics tab degrades gracefully on the missing `tasks` array.
+fn diag_json() -> JsonStr {
+    let body = alloc::format!(
+        r#"{{"uptime_s":{},"heap":{{"total_free_bytes":{},"total_used_bytes":{}}},"fw":"wc-nostd"}}"#,
+        uptime_secs(),
+        esp_alloc::HEAP.free(),
+        esp_alloc::HEAP.used(),
+    );
+    JsonStr(body)
 }
 
 struct AppProps;
-impl AppBuilder for AppProps {
-    type PathRouter = impl picoserve::routing::PathRouter;
-    fn build_app(self) -> picoserve::Router<Self::PathRouter> {
+
+impl AppWithStateBuilder for AppProps {
+    type State = App;
+    type PathRouter = impl picoserve::routing::PathRouter<App>;
+
+    fn build_app(self) -> picoserve::Router<Self::PathRouter, App> {
         picoserve::Router::new()
-            .route("/", get(|| async { "hello from no_std watercontroller\n" }))
+            .route("/", get_service(File::html(SPA_HTML)))
+            .route("/api/diag", get(|| async { diag_json() }))
             .route(
                 "/api/status",
-                get(|| async {
-                    Json(Status { uptime_ms: uptime_secs() * 1000, fw: "wc-nostd" })
+                get(|picoserve::extract::State(app): picoserve::extract::State<App>| async move {
+                    let snap = app.snapshot();
+                    let resp = StatusResponse { state: &snap };
+                    JsonStr(serde_json::to_string(&resp).unwrap_or_default())
                 }),
             )
             .route(
-                "/api/diag",
-                get(|| async {
-                    Json(Diag {
-                        uptime_s: uptime_secs(),
-                        heap: Heap {
-                            total_free_bytes: esp_alloc::HEAP.free(),
-                            total_used_bytes: esp_alloc::HEAP.used(),
-                        },
-                        fw: "wc-nostd",
-                    })
+                "/api/config",
+                get(|picoserve::extract::State(app): picoserve::extract::State<App>| async move {
+                    let cfg = app.config();
+                    let resp = ConfigResponse { config: &cfg };
+                    JsonStr(serde_json::to_string(&resp).unwrap_or_default())
                 }),
             )
     }
@@ -116,12 +159,13 @@ const WEB_TASK_POOL_SIZE: usize = 4;
 async fn web_task(
     task_id: usize,
     stack: Stack<'static>,
-    app: &'static AppRouter<AppProps>,
+    router: &'static AppRouter<AppProps>,
+    app: &'static App,
 ) -> ! {
     let mut tcp_rx = [0u8; 1024];
     let mut tcp_tx = [0u8; 1024];
     let mut http_buf = [0u8; 2048];
-    picoserve::Server::new(app, &SERVER_CONFIG, &mut http_buf)
+    picoserve::Server::new(&router.shared().with_state(app), &SERVER_CONFIG, &mut http_buf)
         .listen_and_serve(task_id, stack, 80, &mut tcp_rx, &mut tcp_tx)
         .await
         .into_never()
@@ -142,6 +186,11 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
     println!("wc-nostd: boot");
+
+    // Domain App — shared, 'static, Clone (Arc inside). Config starts
+    // from compile-time defaults; N9 restores it from NVS.
+    let clock: alloc::sync::Arc<dyn Clock> = alloc::sync::Arc::new(EmbassyClock);
+    let app: &'static App = mk_static!(App, App::new(clock, Config::default()));
 
     let station_cfg = WifiConfig::Station(
         StationConfig::default().with_ssid(SSID).with_password(PASSWORD.into()),
@@ -164,16 +213,16 @@ async fn main(spawner: Spawner) -> ! {
         seed,
     );
 
-    let app = mk_static!(AppRouter<AppProps>, AppProps.build_app());
+    let router = mk_static!(AppRouter<AppProps>, AppProps.build_app());
 
     spawner.spawn(connection_task(controller).unwrap());
     spawner.spawn(net_task(runner).unwrap());
     spawner.spawn(heartbeat(stack).unwrap());
     for id in 0..WEB_TASK_POOL_SIZE {
-        spawner.spawn(web_task(id, stack, app).unwrap());
+        spawner.spawn(web_task(id, stack, router, app).unwrap());
     }
 
-    println!("wc-nostd: listening on :80");
+    println!("wc-nostd: listening on :80 (SPA + /api/*)");
 
     loop {
         Timer::after(Duration::from_secs(60)).await;
