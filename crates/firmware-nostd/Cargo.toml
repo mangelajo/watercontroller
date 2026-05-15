@@ -37,7 +37,7 @@ embassy-net          = { version = "0.9", features = [
 embassy-sync         = "0.8"
 embassy-futures      = "0.1"
 
-picoserve            = { version = "0.18", features = ["embassy", "json", "log"] }
+picoserve            = { version = "0.18", features = ["embassy", "json", "log", "alloc"] }
 serde                = { version = "1", default-features = false, features = ["derive"] }
 # alloc-backed JSON serialization for the API responses (Config is too
 # big/nested for serde-json-core's fixed-buffer serializer).
@@ -67,6 +67,8 @@ log                  = "0.4"
 heapless             = "0.8"
 critical-section     = "1"
 static_cell          = "2"
+spin                 = { version = "0.10", default-features = false, features = ["mutex", "spin_mutex"] }
+embedded-storage     = "0.3"
 
 [features]
 default = []

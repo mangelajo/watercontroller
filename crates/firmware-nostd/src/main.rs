@@ -2,8 +2,9 @@
 //!
 //! HTTP server on :80 via picoserve, serving the embedded SPA and the
 //! JSON API. WiFi STA + DHCP via esp-radio + embassy-net. Domain logic
-//! (state, schedule, switches, valve) comes from `watercontroller-core`
-//! — the same crate the IDF firmware and host build use.
+//! (state, schedule, switches, valve) comes from `watercontroller-core`.
+//! Config + valve state persist across reboot in a flash-backed KV
+//! store (see `nvs.rs`).
 //!
 //! No HTTPS server (the ESP32-PICO-D4 can't host mbedtls server-side —
 //! see README "no_std migration"). Outbound client TLS for webhooks is
@@ -16,10 +17,15 @@
 #![no_std]
 #![no_main]
 #![feature(impl_trait_in_assoc_type)]
+// picoserve's router builds a deeply-nested generic type; the default
+// limit overflows once we chain GET+PUT on a route.
+#![recursion_limit = "256"]
 
 extern crate alloc;
 
-use alloc::string::String;
+mod nvs;
+
+use alloc::{string::String, sync::Arc};
 
 use embassy_executor::Spawner;
 use embassy_net::{Runner, Stack, StackResources};
@@ -34,18 +40,22 @@ use esp_println::println;
 use esp_radio::wifi::{
     sta::StationConfig, Config as WifiConfig, ControllerConfig, Interface, WifiController,
 };
+use esp_storage::FlashStorage;
 use picoserve::{
+    extract::State,
     io::Write,
     response::{Content, File},
-    routing::{get, get_service},
+    routing::{get, get_service, post},
     AppRouter, AppWithStateBuilder,
 };
 use watercontroller_core::{
-    api::{ConfigResponse, StatusResponse},
+    api::{ConfigResponse, StatusResponse, SwitchCommand},
     app::App,
     config::Config,
-    traits::Clock,
+    traits::{Clock, NvsStore},
 };
+
+use crate::nvs::FlashKv;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -60,14 +70,10 @@ macro_rules! mk_static {
 const SSID: &str = env!("WC_WIFI_SSID");
 const PASSWORD: &str = env!("WC_WIFI_PASSWORD");
 
-/// Embedded SPA — same asset the IDF firmware bundles.
 const SPA_HTML: &str = include_str!("../../firmware/assets/index.html");
 
-/// Epoch baseline for the `Clock::now()` wall-clock until SNTP lands
-/// (N11). 2026-05-15T00:00:00Z. Schedule evaluation only needs
-/// *relative* correctness within a day for the cron matcher, and the
-/// firmware re-derives absolute time once SNTP syncs.
-const BASE_EPOCH_S: i64 = 1_778_976_000;
+/// Epoch baseline for `Clock::now()` until SNTP lands (N11).
+const BASE_EPOCH_S: i64 = 1_778_976_000; // 2026-05-15T00:00:00Z
 
 static mut BOOT_INSTANT: Option<Instant> = None;
 
@@ -77,8 +83,6 @@ fn uptime_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// `Clock` backed by embassy's monotonic timer. Wall clock is a fixed
-/// baseline + uptime until SNTP; monotonic is exact.
 struct EmbassyClock;
 impl Clock for EmbassyClock {
     fn now(&self) -> chrono::DateTime<chrono::Utc> {
@@ -90,13 +94,9 @@ impl Clock for EmbassyClock {
     }
 }
 
-/// A pre-serialized JSON body. We serialize with `serde_json` (alloc)
-/// rather than picoserve's serde-json-core `Json` because the `Config`
-/// struct is large + deeply nested and serde-json-core's fixed-buffer
-/// serializer is easy to overflow. alloc-backed serialization has no
-/// such limit.
+/// Pre-serialized JSON body (alloc-backed; no serde-json-core buffer
+/// limits — important for the large `Config`).
 struct JsonStr(String);
-
 impl Content for JsonStr {
     fn content_type(&self) -> &'static str {
         "application/json"
@@ -109,43 +109,82 @@ impl Content for JsonStr {
     }
 }
 
-/// `/api/diag` — heap + uptime. no_std has no per-task HWM table the
-/// way FreeRTOS did, so this stays a lean object; the SPA's
-/// Diagnostics tab degrades gracefully on the missing `tasks` array.
+/// Router state: the domain App + a handle to the NVS store (so the
+/// config-write path can persist). Both are cheap to clone (Arc).
+#[derive(Clone)]
+struct AppState {
+    app: App,
+    nvs: Arc<dyn NvsStore>,
+}
+
 fn diag_json() -> JsonStr {
-    let body = alloc::format!(
+    JsonStr(alloc::format!(
         r#"{{"uptime_s":{},"heap":{{"total_free_bytes":{},"total_used_bytes":{}}},"fw":"wc-nostd"}}"#,
         uptime_secs(),
         esp_alloc::HEAP.free(),
         esp_alloc::HEAP.used(),
-    );
-    JsonStr(body)
+    ))
 }
 
 struct AppProps;
 
 impl AppWithStateBuilder for AppProps {
-    type State = App;
-    type PathRouter = impl picoserve::routing::PathRouter<App>;
+    type State = AppState;
+    type PathRouter = impl picoserve::routing::PathRouter<AppState>;
 
-    fn build_app(self) -> picoserve::Router<Self::PathRouter, App> {
+    fn build_app(self) -> picoserve::Router<Self::PathRouter, AppState> {
         picoserve::Router::new()
             .route("/", get_service(File::html(SPA_HTML)))
             .route("/api/diag", get(|| async { diag_json() }))
             .route(
                 "/api/status",
-                get(|picoserve::extract::State(app): picoserve::extract::State<App>| async move {
-                    let snap = app.snapshot();
-                    let resp = StatusResponse { state: &snap };
-                    JsonStr(serde_json::to_string(&resp).unwrap_or_default())
+                get(|State(st): State<AppState>| async move {
+                    let snap = st.app.snapshot();
+                    JsonStr(serde_json::to_string(&StatusResponse { state: &snap }).unwrap_or_default())
                 }),
             )
             .route(
                 "/api/config",
-                get(|picoserve::extract::State(app): picoserve::extract::State<App>| async move {
-                    let cfg = app.config();
-                    let resp = ConfigResponse { config: &cfg };
-                    JsonStr(serde_json::to_string(&resp).unwrap_or_default())
+                get(|State(st): State<AppState>| async move {
+                    // Secrets (WiFi/MQTT passwords, TLS key, admin
+                    // token) are redacted — the SPA never needs them
+                    // back. The IDF firmware gated the full dump
+                    // behind ?all=1; the no_std build just always
+                    // redacts (the backup/restore flow can come later).
+                    let cfg = st.app.config();
+                    let safe = cfg.redact_secrets_for_api();
+                    JsonStr(serde_json::to_string(&ConfigResponse { config: &safe }).unwrap_or_default())
+                })
+                .put(|State(st): State<AppState>, body: alloc::vec::Vec<u8>| async move {
+                    match serde_json::from_slice::<Config>(&body) {
+                        Ok(cfg) => {
+                            // Persist first, then apply in-RAM.
+                            if let Err(e) = cfg.save(&*st.nvs) {
+                                return JsonStr(alloc::format!(
+                                    r#"{{"error":"nvs save failed: {:?}"}}"#, e
+                                ));
+                            }
+                            st.app.replace_config(cfg);
+                            JsonStr(String::from(r#"{"result":"ok"}"#))
+                        }
+                        Err(e) => JsonStr(alloc::format!(
+                            r#"{{"error":"bad config json: {}"}}"#, e
+                        )),
+                    }
+                }),
+            )
+            .route(
+                "/api/switch",
+                post(|State(st): State<AppState>, body: alloc::vec::Vec<u8>| async move {
+                    match serde_json::from_slice::<SwitchCommand>(&body) {
+                        Ok(cmd) => {
+                            let outcome = st.app.switch_command(cmd);
+                            JsonStr(serde_json::to_string(&outcome).unwrap_or_default())
+                        }
+                        Err(e) => JsonStr(alloc::format!(
+                            r#"{{"error":"bad switch command: {}"}}"#, e
+                        )),
+                    }
                 }),
             )
     }
@@ -160,15 +199,27 @@ async fn web_task(
     task_id: usize,
     stack: Stack<'static>,
     router: &'static AppRouter<AppProps>,
-    app: &'static App,
+    state: &'static AppState,
 ) -> ! {
     let mut tcp_rx = [0u8; 1024];
     let mut tcp_tx = [0u8; 1024];
     let mut http_buf = [0u8; 2048];
-    picoserve::Server::new(&router.shared().with_state(app), &SERVER_CONFIG, &mut http_buf)
+    picoserve::Server::new(&router.shared().with_state(state), &SERVER_CONFIG, &mut http_buf)
         .listen_and_serve(task_id, stack, 80, &mut tcp_rx, &mut tcp_tx)
         .await
         .into_never()
+}
+
+/// Once-a-second App tick — drives the switch auto-off timers + valve
+/// sequencer. GPIO output application lands in N10; for now the tick
+/// keeps the in-RAM state machine (and NVS valve-state persistence)
+/// correct.
+#[embassy_executor::task]
+async fn tick_task(app: App) {
+    loop {
+        app.tick();
+        Timer::after(Duration::from_secs(1)).await;
+    }
 }
 
 #[esp_rtos::main]
@@ -187,10 +238,19 @@ async fn main(spawner: Spawner) -> ! {
 
     println!("wc-nostd: boot");
 
-    // Domain App — shared, 'static, Clone (Arc inside). Config starts
-    // from compile-time defaults; N9 restores it from NVS.
-    let clock: alloc::sync::Arc<dyn Clock> = alloc::sync::Arc::new(EmbassyClock);
-    let app: &'static App = mk_static!(App, App::new(clock, Config::default()));
+    // Flash-backed NVS. Config is restored from it (or compile-time
+    // defaults on a blank store / parse failure).
+    let flash = FlashStorage::new(peripherals.FLASH);
+    let nvs: Arc<dyn NvsStore> = Arc::new(FlashKv::new(flash));
+    let config = Config::load(&*nvs).unwrap_or_else(|_| {
+        println!("nvs: no stored config, using defaults");
+        Config::default()
+    });
+
+    let clock: Arc<dyn Clock> = Arc::new(EmbassyClock);
+    let app = App::with_nvs(clock, config, Some(nvs.clone()));
+
+    let state: &'static AppState = mk_static!(AppState, AppState { app: app.clone(), nvs });
 
     let station_cfg = WifiConfig::Station(
         StationConfig::default().with_ssid(SSID).with_password(PASSWORD.into()),
@@ -218,8 +278,9 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(connection_task(controller).unwrap());
     spawner.spawn(net_task(runner).unwrap());
     spawner.spawn(heartbeat(stack).unwrap());
+    spawner.spawn(tick_task(app).unwrap());
     for id in 0..WEB_TASK_POOL_SIZE {
-        spawner.spawn(web_task(id, stack, router, app).unwrap());
+        spawner.spawn(web_task(id, stack, router, state).unwrap());
     }
 
     println!("wc-nostd: listening on :80 (SPA + /api/*)");
