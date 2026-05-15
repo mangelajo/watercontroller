@@ -75,6 +75,9 @@ mbedtls-rs           = { git = "https://github.com/esp-rs/esp-mbedtls", rev = "1
 log                  = "0.4"
 heapless             = "0.8"
 critical-section     = "1"
+# 64-bit atomic for the SNTP epoch offset — the ESP32 (Xtensa LX6) has
+# no native 64-bit atomics; the `critical-section` feature emulates it.
+portable-atomic      = { version = "1", features = ["critical-section"] }
 static_cell          = "2"
 spin                 = { version = "0.10", default-features = false, features = ["mutex", "spin_mutex"] }
 embedded-storage     = "0.3"

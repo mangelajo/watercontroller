@@ -25,6 +25,8 @@ extern crate alloc;
 
 mod mqtt;
 mod nvs;
+mod sntp;
+mod webhook;
 
 use alloc::{string::String, sync::Arc};
 
@@ -78,12 +80,13 @@ const PASSWORD: &str = env!("PASSWORD");
 
 const SPA_HTML: &str = include_str!("../../firmware/assets/index.html");
 
-/// Epoch baseline for `Clock::now()` until SNTP lands (N11).
-const BASE_EPOCH_S: i64 = 1_778_976_000; // 2026-05-15T00:00:00Z
+/// Epoch baseline for `Clock::now()` before SNTP completes its first
+/// sync. Once `sntp` publishes a real offset this is unused.
+const BASE_EPOCH_S: i64 = 1_778_803_200; // 2026-05-15T00:00:00Z
 
 static mut BOOT_INSTANT: Option<Instant> = None;
 
-fn uptime_secs() -> u64 {
+pub(crate) fn uptime_secs() -> u64 {
     unsafe { BOOT_INSTANT }
         .map(|t| (Instant::now() - t).as_secs())
         .unwrap_or(0)
@@ -92,7 +95,11 @@ fn uptime_secs() -> u64 {
 struct EmbassyClock;
 impl Clock for EmbassyClock {
     fn now(&self) -> chrono::DateTime<chrono::Utc> {
-        chrono::DateTime::from_timestamp(BASE_EPOCH_S + uptime_secs() as i64, 0)
+        // Prefer the SNTP-derived epoch-at-boot; fall back to the
+        // compile-time baseline until the first sync lands.
+        let at_boot = sntp::EPOCH_AT_BOOT.load(core::sync::atomic::Ordering::Relaxed);
+        let base = if at_boot != 0 { at_boot } else { BASE_EPOCH_S };
+        chrono::DateTime::from_timestamp(base + uptime_secs() as i64, 0)
             .unwrap_or_default()
     }
     fn monotonic_ms(&self) -> u64 {
@@ -278,6 +285,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let clock: Arc<dyn Clock> = Arc::new(EmbassyClock);
     let app = App::with_nvs(clock, config, Some(nvs.clone()));
+    app.set_webhook_dispatcher(Arc::new(webhook::EmbassyWebhookDispatcher::new()));
 
     // Actuator GPIOs — all start LOW (everything off / coils idle).
     let oc = OutputConfig::default();
@@ -318,7 +326,9 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(net_task(runner).unwrap());
     spawner.spawn(heartbeat(stack).unwrap());
     spawner.spawn(tick_task(app.clone(), valve_pins).unwrap());
-    spawner.spawn(mqtt::mqtt_task(app, stack).unwrap());
+    spawner.spawn(mqtt::mqtt_task(app.clone(), stack).unwrap());
+    spawner.spawn(sntp::sntp_task(stack).unwrap());
+    spawner.spawn(webhook::webhook_task(app, stack).unwrap());
     for id in 0..WEB_TASK_POOL_SIZE {
         spawner.spawn(web_task(id, stack, router, state).unwrap());
     }
