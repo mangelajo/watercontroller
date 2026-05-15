@@ -14,8 +14,14 @@ use crate::webhook::{EventKind, NoopDispatcher, WebhookDispatcher, WebhookEvent}
 use crate::switch::TimedSwitch;
 use crate::traits::{Clock, NvsStore};
 use crate::water_valve::{ValveOutputs, WaterValve};
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use alloc::{
+    collections::{btree_map::BTreeMap, VecDeque},
+    format,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
+use spin::Mutex;
 
 /// Cap on the in-memory alarm history ring. Sized to fit comfortably in
 /// a single NVS blob (~16 events × ~50 bytes JSON each = under 1 KiB).
@@ -83,7 +89,7 @@ impl App {
             if secs == 0 {
                 None
             } else {
-                Some(std::time::Duration::from_secs(secs as u64))
+                Some(core::time::Duration::from_secs(secs as u64))
             }
         };
         let s1 = TimedSwitch::new(auto_off_or_none(config.switches.sprinkler_1_auto_off_secs));
@@ -135,7 +141,7 @@ impl App {
     /// dispatcher is replaced atomically and dropped at the end of
     /// the call.
     pub fn set_webhook_dispatcher(&self, dispatcher: Arc<dyn WebhookDispatcher>) {
-        *self.inner.webhooks.lock().unwrap() = dispatcher;
+        *self.inner.webhooks.lock() = dispatcher;
     }
 
     /// Emit a webhook event. Non-blocking (the dispatcher implementation
@@ -143,7 +149,7 @@ impl App {
     /// `event_label`, `iso_ts`, `device`, `uptime_s` — if the caller
     /// hasn't already set them.
     pub fn emit_event(&self, mut ev: WebhookEvent) {
-        use std::collections::btree_map::Entry;
+        use alloc::collections::btree_map::Entry;
         let cfg = self.config();
         let now = self.inner.clock.now();
         let uptime_s = self.inner.clock.monotonic_ms() / 1000;
@@ -170,19 +176,19 @@ impl App {
         // without holding the Mutex (dispatch() should be cheap — the
         // firmware impl is just a try_send — but we don't want to
         // serialize all dispatch calls behind one mutex).
-        let dispatcher = self.inner.webhooks.lock().unwrap().clone();
+        let dispatcher = self.inner.webhooks.lock().clone();
         dispatcher.dispatch(ev);
     }
 
     /// Snapshot of past alarm fires (oldest first). Bounded at
     /// `ALARM_HISTORY_CAP`.
     pub fn alarm_history(&self) -> Vec<AlarmEvent> {
-        self.inner.alarm_history.lock().unwrap().iter().cloned().collect()
+        self.inner.alarm_history.lock().iter().cloned().collect()
     }
 
     fn record_alarm_event(&self, ev: AlarmEvent) {
         let snapshot = {
-            let mut h = self.inner.alarm_history.lock().unwrap();
+            let mut h = self.inner.alarm_history.lock();
             if h.len() == ALARM_HISTORY_CAP {
                 h.pop_front();
             }
@@ -200,7 +206,7 @@ impl App {
     /// `None` means there was no persisted state (fresh device or post
     /// factory_reset).
     pub fn restored_valve_state(&self) -> Option<bool> {
-        *self.inner.last_persisted_valve.lock().unwrap()
+        *self.inner.last_persisted_valve.lock()
     }
 
     pub fn clock(&self) -> &dyn Clock {
@@ -221,7 +227,7 @@ impl App {
     /// cfg.x = …; app.replace_config(cfg);` so the clone is explicit at
     /// the callsite that needs it.
     pub fn config(&self) -> Arc<Config> {
-        self.inner.config.lock().unwrap().clone()
+        self.inner.config.lock().clone()
     }
 
     /// Replace the in-memory config and push live-tunable values into the
@@ -240,15 +246,15 @@ impl App {
             if secs == 0 {
                 None
             } else {
-                Some(std::time::Duration::from_secs(secs as u64))
+                Some(core::time::Duration::from_secs(secs as u64))
             }
         };
-        self.inner.sprinkler1.lock().unwrap()
+        self.inner.sprinkler1.lock()
             .set_auto_off(auto_off_or_none(cfg.switches.sprinkler_1_auto_off_secs));
-        self.inner.sprinkler2.lock().unwrap()
+        self.inner.sprinkler2.lock()
             .set_auto_off(auto_off_or_none(cfg.switches.sprinkler_2_auto_off_secs));
-        self.inner.valve.lock().unwrap().set_timing(cfg.switches.valve_timing);
-        *self.inner.config.lock().unwrap() = Arc::new(cfg);
+        self.inner.valve.lock().set_timing(cfg.switches.valve_timing);
+        *self.inner.config.lock() = Arc::new(cfg);
         self.emit_event(
             WebhookEvent::new(EventKind::ConfigChanged).with("section", section.to_string()),
         );
@@ -264,9 +270,9 @@ impl App {
             "sprinkler_2" => &self.inner.sprinkler2,
             _ => return false,
         };
-        let mut s = lock.lock().unwrap();
+        let mut s = lock.lock();
         match duration_secs {
-            Some(d) => s.turn_on_for(now, std::time::Duration::from_secs(d as u64)),
+            Some(d) => s.turn_on_for(now, core::time::Duration::from_secs(d as u64)),
             None => s.turn_on(now),
         }
         match duration_secs {
@@ -282,7 +288,7 @@ impl App {
         let now = self.inner.clock.monotonic_ms();
         match cmd {
             SwitchCommand::Sprinkler1 { on } => {
-                let mut s = self.inner.sprinkler1.lock().unwrap();
+                let mut s = self.inner.sprinkler1.lock();
                 let was_on = s.is_on();
                 if on { s.turn_on(now); } else { s.turn_off(now); }
                 if was_on != on {
@@ -291,7 +297,7 @@ impl App {
                 CommandOutcome::Ok
             }
             SwitchCommand::Sprinkler2 { on } => {
-                let mut s = self.inner.sprinkler2.lock().unwrap();
+                let mut s = self.inner.sprinkler2.lock();
                 let was_on = s.is_on();
                 if on { s.turn_on(now); } else { s.turn_off(now); }
                 if was_on != on {
@@ -300,7 +306,7 @@ impl App {
                 CommandOutcome::Ok
             }
             SwitchCommand::WaterControl { on } => {
-                let mut v = self.inner.valve.lock().unwrap();
+                let mut v = self.inner.valve.lock();
                 if v.is_busy() {
                     log::warn!(
                         "water_control: refused {} — valve in mid-sequence",
@@ -329,9 +335,9 @@ impl App {
         // Drive timers under per-component locks. The TimedSwitch ticks
         // tell us whether *this* tick was the one that fired auto-off, so
         // we can log it without false-positives from manual `turn_off`.
-        let s1_auto_off_fired = self.inner.sprinkler1.lock().unwrap().tick(now);
-        let s2_auto_off_fired = self.inner.sprinkler2.lock().unwrap().tick(now);
-        let valve_outputs = self.inner.valve.lock().unwrap().tick(now);
+        let s1_auto_off_fired = self.inner.sprinkler1.lock().tick(now);
+        let s2_auto_off_fired = self.inner.sprinkler2.lock().tick(now);
+        let valve_outputs = self.inner.valve.lock().tick(now);
         if s1_auto_off_fired {
             log::info!("sprinkler_1: off (auto-off after timer expiry)");
         }
@@ -341,9 +347,9 @@ impl App {
 
         // Mirror state into the snapshot. Re-acquire the locks briefly to
         // minimise time held simultaneously.
-        let s1_on = self.inner.sprinkler1.lock().unwrap().is_on();
-        let s2_on = self.inner.sprinkler2.lock().unwrap().is_on();
-        let valve_state = self.inner.valve.lock().unwrap().state();
+        let s1_on = self.inner.sprinkler1.lock().is_on();
+        let s2_on = self.inner.sprinkler2.lock().is_on();
+        let valve_state = self.inner.valve.lock().state();
 
         self.inner.state.update(|s| {
             // Water control transitions are logged on every state change
@@ -370,8 +376,8 @@ impl App {
         // write when the value changes — avoids hot-looping NVS writes
         // during the no-op tick path.
         if let Some(nvs) = &self.inner.nvs {
-            let user_on = self.inner.valve.lock().unwrap().user_state();
-            let mut last = self.inner.last_persisted_valve.lock().unwrap();
+            let user_on = self.inner.valve.lock().user_state();
+            let mut last = self.inner.last_persisted_valve.lock();
             if *last != Some(user_on) {
                 let byte = [u8::from(user_on)];
                 if let Err(e) = nvs.set(NVS_VALVE_STATE, &byte) {
@@ -410,7 +416,7 @@ impl App {
         // Update last-check timestamp even when disabled so a later
         // enable doesn't see a giant accumulated delta.
         let delta_s = {
-            let mut last = self.inner.flow_alarm_last_check_ms.lock().unwrap();
+            let mut last = self.inner.flow_alarm_last_check_ms.lock();
             let d = match *last {
                 Some(t) => ((now_ms.saturating_sub(t)) / 1000) as u32,
                 None => 0,

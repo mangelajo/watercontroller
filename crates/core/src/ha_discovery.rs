@@ -5,6 +5,7 @@
 //! and auto-creates the entity. All entities share one `device` block so HA
 //! groups them under a single device card.
 
+use alloc::{format, string::String, vec, vec::Vec};
 use serde::Serialize;
 
 #[derive(Debug, Clone)]

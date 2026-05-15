@@ -2,6 +2,7 @@
 //! `esp-idf-svc`/`esp-idf-hal`; the `host` crate implements them with fakes.
 //! Anything in `core` that needs to touch hardware goes through these traits.
 
+use alloc::{boxed::Box, string::String, vec::Vec};
 use chrono::{DateTime, Utc};
 
 /// Wall-clock + monotonic time. Implementations must always return increasing
@@ -36,8 +37,8 @@ pub enum NvsError {
     Io(String),
 }
 
-impl std::fmt::Display for NvsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for NvsError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NotFound => write!(f, "key not found"),
             Self::Full => write!(f, "storage full"),
@@ -46,7 +47,7 @@ impl std::fmt::Display for NvsError {
     }
 }
 
-impl std::error::Error for NvsError {}
+impl core::error::Error for NvsError {}
 
 /// Persistent key-value store. Values are arbitrary bytes; serialization is
 /// the caller's responsibility (we use serde+serde_json elsewhere).

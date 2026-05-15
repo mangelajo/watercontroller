@@ -3,8 +3,9 @@
 
 use crate::traits::WifiState;
 use crate::water_valve::WaterState;
+use alloc::string::String;
 use serde::Serialize;
-use std::sync::Mutex;
+use spin::Mutex;
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct Sensors {
@@ -111,11 +112,11 @@ impl DeviceState {
     }
 
     pub fn snapshot(&self) -> DeviceSnapshot {
-        self.inner.lock().unwrap().clone()
+        self.inner.lock().clone()
     }
 
     pub fn update<F: FnOnce(&mut DeviceSnapshot)>(&self, f: F) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock();
         f(&mut g);
     }
 }

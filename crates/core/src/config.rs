@@ -5,6 +5,7 @@
 use crate::calibration::Calibration;
 use crate::schedule::{default_schedule, Schedule};
 use crate::traits::{NvsError, NvsStore, WifiCreds};
+use alloc::{string::String, vec, vec::Vec};
 use serde::{Deserialize, Serialize};
 
 const NVS_KEY: &str = "wc.cfg";
@@ -295,15 +296,15 @@ pub enum ConfigError {
     Json(serde_json::Error),
 }
 
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Nvs(e) => write!(f, "nvs error: {e}"),
             Self::Json(e) => write!(f, "json error: {e}"),
         }
     }
 }
-impl std::error::Error for ConfigError {}
+impl core::error::Error for ConfigError {}
 
 impl From<NvsError> for ConfigError {
     fn from(e: NvsError) -> Self {

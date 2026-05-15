@@ -10,6 +10,7 @@
 //! (e.g. an SNTP sync that jumps the clock forward), and avoids double-firing
 //! across normal minute ticks because the interval is exclusive on the left.
 
+use alloc::{string::String, vec, vec::Vec};
 use chrono::{DateTime, Datelike, NaiveDateTime, TimeZone, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 

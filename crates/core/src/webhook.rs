@@ -18,8 +18,8 @@
 //!
 //! Event-specific extras are documented per `EventKind`.
 
+use alloc::{collections::BTreeMap, format, string::{String, ToString}, vec::Vec};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// Canonical event identifiers. The on-the-wire JSON name uses the
 /// dotted form (`flow_alarm.fire`) so a single webhook can subscribe
@@ -274,22 +274,22 @@ impl WebhookDispatcher for NoopDispatcher {
 /// can assert what fired. Thread-safe.
 #[derive(Default)]
 pub struct RecordingDispatcher {
-    events: std::sync::Mutex<Vec<WebhookEvent>>,
+    events: spin::Mutex<Vec<WebhookEvent>>,
 }
 impl RecordingDispatcher {
     pub fn take(&self) -> Vec<WebhookEvent> {
-        std::mem::take(&mut *self.events.lock().unwrap())
+        core::mem::take(&mut *self.events.lock())
     }
     pub fn len(&self) -> usize {
-        self.events.lock().unwrap().len()
+        self.events.lock().len()
     }
     pub fn is_empty(&self) -> bool {
-        self.events.lock().unwrap().is_empty()
+        self.events.lock().is_empty()
     }
 }
 impl WebhookDispatcher for RecordingDispatcher {
     fn dispatch(&self, event: WebhookEvent) {
-        self.events.lock().unwrap().push(event);
+        self.events.lock().push(event);
     }
 }
 

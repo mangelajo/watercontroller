@@ -7,21 +7,36 @@ description = "Platform-independent logic for the doremorwater controller"
 build = "build.rs"
 
 [dependencies]
-log = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-# `chrono` with std + alloc + serde (no `clock` feature — time always comes
-# through the Clock trait, never directly from the OS).
-chrono = { version = "0.4", default-features = false, features = ["alloc", "std", "serde"] }
+# Declared directly (not via `workspace = true`) so default-features = false
+# actually takes effect. Workspace inheritance of `default-features = false`
+# is ignored if the workspace dep doesn't disable defaults too.
+log        = { version = "0.4",  default-features = false }
+serde      = { version = "1",    default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1",    default-features = false, features = ["alloc"] }
+# chrono with no `std` by default — turned on by the `std` feature of this
+# crate. `alloc` + `serde` always on; `clock` never (time comes through the
+# Clock trait, not the OS).
+chrono = { version = "0.4", default-features = false, features = ["alloc", "serde"] }
 # Timezone-aware schedule evaluation. `filter-by-regex` keeps only Europe/*
-# zones at compile time so the bundled tzdata stays small (we only need
-# Europe/Madrid for now; users can add more).
+# zones at compile time so the bundled tzdata stays small.
 chrono-tz = { version = "0.10", default-features = false, features = ["filter-by-regex"] }
 # Bounded queues / ring buffers without alloc explosion.
 heapless = "0.8"
+# Sync primitives that work in both std and no_std. `spin::Mutex` has the
+# same `.lock() -> Guard` API as `std::sync::Mutex` minus the poisoning
+# Result. We give up poison-detection (which is mostly useless on embedded
+# anyway) to keep call sites identical across platforms.
+spin = { version = "0.10", default-features = false, features = ["mutex", "spin_mutex", "once"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+
+[features]
+default = ["std"]
+# Pulls in std-only bits: the `log_buffer` mpsc + OnceLock infrastructure
+# and the chrono `std` feature. The no_std firmware crate disables this
+# and uses spin-based locks instead.
+std = ["chrono/std", "serde/std", "serde_json/std", "log/std"]
 
 # chrono-tz timezone filter is applied via the `CHRONO_TZ_TIMEZONE_FILTER`
 # env var (set in crates/firmware/.cargo/config.toml). The bundled tzdata

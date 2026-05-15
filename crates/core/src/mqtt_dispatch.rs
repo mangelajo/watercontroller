@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::ha_discovery::{all_messages, DeviceContext};
 use crate::state::{DeviceSnapshot, WaterControlState};
 use crate::traits::{Mqtt, PublishOpts};
-use std::sync::Arc;
+use alloc::{boxed::Box, format, string::{String, ToString}, sync::Arc, vec::Vec};
 
 pub struct MqttIntegration {
     pub app: App,

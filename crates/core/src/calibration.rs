@@ -7,6 +7,7 @@
 //! the second. The pressure sensor in the original ESPHome config uses a
 //! 2-stage chain.
 
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -26,7 +27,7 @@ impl Calibration {
         if pts.len() < 2 {
             return None;
         }
-        pts.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap_or(std::cmp::Ordering::Equal));
+        pts.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap_or(core::cmp::Ordering::Equal));
         for w in pts.windows(2) {
             if (w[0][0] - w[1][0]).abs() < f32::EPSILON {
                 return None;
@@ -75,7 +76,7 @@ impl Calibration {
                 }
             }
         }
-        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
         xs.dedup_by(|a, b| (*a - *b).abs() < f32::EPSILON);
         let pairs: Vec<(f32, f32)> = xs
             .into_iter()
