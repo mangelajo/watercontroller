@@ -1,9 +1,15 @@
 [workspace]
 resolver = "2"
 members = ["crates/core", "crates/host", "crates/firmware"]
-# firmware needs the `esp` toolchain + xtensa target, so it's excluded from
-# the default set. Build it explicitly with:
-#   cd crates/firmware && cargo build
+# Both firmware crates need the `esp` toolchain + xtensa target, so
+# they're excluded from the default workspace set. Build them explicitly:
+#   cd crates/firmware       && cargo build    # esp-idf-svc (production)
+#   cd crates/firmware-nostd && cargo build    # no_std spike (WIP)
+# `firmware-nostd` is deliberately NOT a workspace member yet — its
+# rust-toolchain.toml + .cargo/config.toml are incompatible with the
+# host build (build-std forces a different sysroot path). It builds
+# standalone from its own directory.
+exclude = ["crates/firmware-nostd"]
 default-members = ["crates/core", "crates/host"]
 
 [workspace.package]

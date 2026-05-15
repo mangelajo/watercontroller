@@ -1,0 +1,56 @@
+[package]
+name = "watercontroller-firmware-nostd"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Pure-Rust no_std firmware for the doremorwater controller"
+
+# Standalone workspace — explicit `members = ["."]` keeps cargo from
+# walking up and finding the parent workspace (which would override
+# our .cargo/config.toml's xtensa target).
+[workspace]
+members = ["."]
+
+# Modelled on esp-hal's own examples/wifi/embassy_dhcp/Cargo.toml at
+# rev a4833ad (esp-hal v1.1.1). All esp-* crates come from the same
+# monorepo revision so cargo treats them as one workspace — required
+# because they share private (`__`-prefix) features that crates.io
+# publication blocks across packages.
+[dependencies]
+esp-hal              = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442", features = ["esp32", "unstable", "log-04"] }
+esp-rtos             = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442", features = ["esp32", "esp-radio", "embassy", "log-04"] }
+esp-radio            = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442", features = ["esp32", "wifi", "log-04"] }
+esp-alloc            = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442" }
+esp-bootloader-esp-idf = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442", features = ["esp32"] }
+esp-backtrace        = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442", features = ["esp32", "println", "panic-handler"] }
+esp-println          = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442", features = ["esp32", "log-04"] }
+esp-storage          = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442", features = ["esp32"] }
+sequential-storage   = "7"
+
+# Embassy async stack. Versions match what esp-rtos / esp-radio require.
+embassy-executor     = "0.10"
+embassy-time         = "0.5"
+embassy-net          = { version = "0.9", features = [
+    "tcp", "udp", "dns", "dhcpv4",
+    "medium-ethernet", "proto-ipv4",
+] }
+embassy-sync         = "0.8"
+embassy-futures      = "0.1"
+
+# N5+: picoserve. N6+: esp-mbedtls (server TLS). N7+: edge-mqtt / edge-mdns
+# / reqwless. Added incrementally.
+
+# Cross-platform building blocks.
+log                  = "0.4"
+heapless             = "0.8"
+critical-section     = "1"
+static_cell          = "2"
+
+[features]
+default = []
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "debuginfo"

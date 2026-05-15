@@ -1,0 +1,6 @@
+[toolchain]
+channel = "esp"
+# Provided by `espup install` (already in your bootstrap path).
+# Required components: rust-src for build-std.
+components = ["rust-src"]
+targets = ["xtensa-esp32-none-elf"]

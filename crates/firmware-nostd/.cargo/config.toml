@@ -1,0 +1,19 @@
+# Modelled on esp-hal's own examples — target-arch-conditional
+# linker args, target itself set by `--target` flag at the cargo
+# invocation (or `CARGO_BUILD_TARGET` env). `[build] target = ...`
+# breaks `cargo metadata --no-deps` because cargo tries to learn
+# about the target before the rustflags have been applied.
+
+[target.'cfg(target_arch = "xtensa")']
+runner    = "espflash flash --monitor"
+rustflags = [
+  "-C", "link-arg=-Wl,-Tlinkall.x",
+  "-C", "link-arg=-nostartfiles",
+]
+
+[env]
+# Keep tzdata small; same filter as the IDF firmware.
+CHRONO_TZ_TIMEZONE_FILTER = "Europe/.*"
+
+[unstable]
+build-std = ["alloc", "core"]
