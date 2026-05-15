@@ -33,7 +33,10 @@ use embassy_time::{Duration, Instant, Timer};
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_hal::{
-    clock::CpuClock, interrupt::software::SoftwareInterruptControl, rng::Rng,
+    clock::CpuClock,
+    gpio::{Level, Output, OutputConfig},
+    interrupt::software::SoftwareInterruptControl,
+    rng::Rng,
     timer::timg::TimerGroup,
 };
 use esp_println::println;
@@ -210,14 +213,37 @@ async fn web_task(
         .into_never()
 }
 
-/// Once-a-second App tick — drives the switch auto-off timers + valve
-/// sequencer. GPIO output application lands in N10; for now the tick
-/// keeps the in-RAM state machine (and NVS valve-state persistence)
-/// correct.
+/// The five actuator GPIOs. Pin map matches the ESPHome reference +
+/// the IDF firmware: sprinkler 1 = GPIO12, sprinkler 2 = GPIO4,
+/// valve OPEN coil = GPIO26, valve CLOSE coil = GPIO27, drain = GPIO25.
+struct ValvePins {
+    sprinkler1: Output<'static>,
+    sprinkler2: Output<'static>,
+    valve_open: Output<'static>,
+    valve_close: Output<'static>,
+    drain: Output<'static>,
+}
+
+fn level(on: bool) -> Level {
+    if on {
+        Level::High
+    } else {
+        Level::Low
+    }
+}
+
+/// 1 Hz App tick — runs the switch auto-off timers + valve sequencer
+/// and applies the resulting actuator states to the GPIOs. This is the
+/// firmware's actual control loop.
 #[embassy_executor::task]
-async fn tick_task(app: App) {
+async fn tick_task(app: App, mut pins: ValvePins) {
     loop {
-        app.tick();
+        let out = app.tick();
+        pins.sprinkler1.set_level(level(out.sprinkler_1));
+        pins.sprinkler2.set_level(level(out.sprinkler_2));
+        pins.valve_open.set_level(level(out.valve.open_motor));
+        pins.valve_close.set_level(level(out.valve.close_motor));
+        pins.drain.set_level(level(out.valve.drain));
         Timer::after(Duration::from_secs(1)).await;
     }
 }
@@ -250,6 +276,16 @@ async fn main(spawner: Spawner) -> ! {
     let clock: Arc<dyn Clock> = Arc::new(EmbassyClock);
     let app = App::with_nvs(clock, config, Some(nvs.clone()));
 
+    // Actuator GPIOs — all start LOW (everything off / coils idle).
+    let oc = OutputConfig::default();
+    let valve_pins = ValvePins {
+        sprinkler1: Output::new(peripherals.GPIO12, Level::Low, oc),
+        sprinkler2: Output::new(peripherals.GPIO4, Level::Low, oc),
+        valve_open: Output::new(peripherals.GPIO26, Level::Low, oc),
+        valve_close: Output::new(peripherals.GPIO27, Level::Low, oc),
+        drain: Output::new(peripherals.GPIO25, Level::Low, oc),
+    };
+
     let state: &'static AppState = mk_static!(AppState, AppState { app: app.clone(), nvs });
 
     let station_cfg = WifiConfig::Station(
@@ -278,7 +314,7 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(connection_task(controller).unwrap());
     spawner.spawn(net_task(runner).unwrap());
     spawner.spawn(heartbeat(stack).unwrap());
-    spawner.spawn(tick_task(app).unwrap());
+    spawner.spawn(tick_task(app, valve_pins).unwrap());
     for id in 0..WEB_TASK_POOL_SIZE {
         spawner.spawn(web_task(id, stack, router, state).unwrap());
     }
