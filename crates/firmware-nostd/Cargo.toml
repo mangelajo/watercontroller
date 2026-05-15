@@ -51,7 +51,7 @@ watercontroller-core = { path = "../core", default-features = false }
 # N6: TLS server via mbedtls-rs (Espressif's no_std mbedTLS wrapper —
 # uses HW SHA/AES on ESP32 via `EspAccel`, which goes through `unstable`
 # features of esp-hal).
-mbedtls-rs           = { git = "https://github.com/esp-rs/esp-mbedtls", rev = "177721027aae6e014e1cf922608eb9955d70d85b", default-features = false, features = ["esp32", "embassy-time", "log"] }
+mbedtls-rs           = { git = "https://github.com/esp-rs/esp-mbedtls", rev = "177721027aae6e014e1cf922608eb9955d70d85b", default-features = false, features = ["esp32", "embassy-time", "log", "hook-timer", "hook-wall-clock"] }
 
 # Cross-platform building blocks.
 log                  = "0.4"
