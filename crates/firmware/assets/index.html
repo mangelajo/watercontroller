@@ -771,7 +771,7 @@
       <section class="card full">
         <h2>Diagnostics (auto-refresh)</h2>
         <p class="status-msg">Live heap and per-task stack high-water marks from
-          <code>/api/diag</code>. Refreshes every 5 seconds while this tab is open.
+          <code>/api/diag</code>. Refreshes every 10 seconds while this tab is open.
           Useful for spotting memory pressure (low <em>min ever free</em>) or tasks
           dangerously close to overflowing their stack (low <em>stack free</em>).</p>
         <div class="grid2" id="diag-heap">
@@ -1004,19 +1004,24 @@
       if (SETTINGS_TABS.has(tab) && !currentConfig) loadConfig();
       setDiagPolling(tab === "advanced");
       setLogsConnection(tab === "logs");
+      // Live status poll runs only on tabs that display it; every tab
+      // switch still does one refresh so the header link chip and the
+      // alarm banner are current on whatever tab you land on.
+      setStatusPolling(tab === "dashboard" || tab === "sprinklers");
+      refreshStatus();
       // Webhooks aren't part of the main config blob — fetch on tab open.
       if (tab === "webhooks") loadWebhooks();
     });
   }
 
   // ---- Diagnostics (Advanced tab) ----
-  // Polls /api/diag every 5 s, but ONLY while the Advanced tab is open —
-  // otherwise we'd be hammering the device for nothing.
+  // Polls /api/diag every 10 s, but ONLY while the Advanced tab is open
+  // — otherwise we'd be hammering the device for nothing.
   let diagTimer = null;
   function setDiagPolling(on) {
     if (on && !diagTimer) {
       refreshDiag();
-      diagTimer = setInterval(refreshDiag, 5000);
+      diagTimer = setInterval(refreshDiag, 10000);
     } else if (!on && diagTimer) {
       clearInterval(diagTimer); diagTimer = null;
     }
@@ -1096,11 +1101,21 @@
     };
   }
 
-  // Status poll: 5 s is responsive enough for a water controller and
-  // keeps the request rate low so the small HTTP worker pool isn't
-  // hammered. Switch toggles still refresh immediately on action.
+  // Status poll runs only while a tab that shows live status is open
+  // (dashboard sensors/switches, sprinklers alarm banner) — see the tab
+  // handler. 10 s keeps the device's request rate low; switch toggles
+  // and tab switches still refresh immediately.
+  let statusTimer = null;
+  function setStatusPolling(on) {
+    if (on && !statusTimer) {
+      statusTimer = setInterval(refreshStatus, 10000);
+    } else if (!on && statusTimer) {
+      clearInterval(statusTimer);
+      statusTimer = null;
+    }
+  }
   refreshStatus();
-  setInterval(refreshStatus, 5000);
+  setStatusPolling(true); // the dashboard is the default tab on load
 
   // ---- Loading modal ----
   // Shown while a fetch that populates a whole tab is in flight, so the
