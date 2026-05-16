@@ -126,6 +126,31 @@ impl Content for JsonStr {
     }
 }
 
+/// Handler response that is either a JSON body (200) or an empty
+/// `204 No Content` — the latter for action endpoints (`alarm/clear`,
+/// `wifi/reconnect`) where the SPA + test suite expect 204.
+pub(crate) enum ApiResp {
+    Json(String),
+    NoContent,
+}
+
+impl picoserve::response::IntoResponse for ApiResp {
+    async fn write_to<R: picoserve::io::Read, W: picoserve::response::ResponseWriter<Error = R::Error>>(
+        self,
+        connection: picoserve::response::Connection<'_, R>,
+        response_writer: W,
+    ) -> Result<picoserve::ResponseSent, W::Error> {
+        match self {
+            ApiResp::Json(s) => JsonStr(s).write_to(connection, response_writer).await,
+            ApiResp::NoContent => {
+                (picoserve::response::StatusCode::NO_CONTENT, picoserve::response::NoContent)
+                    .write_to(connection, response_writer)
+                    .await
+            }
+        }
+    }
+}
+
 /// Router state: the domain App, a handle to the NVS store (so the
 /// config-write path can persist), and the concrete `FlashKv` (the OTA
 /// handler borrows its raw flash). All cheap to clone (Arc).
@@ -230,12 +255,12 @@ impl AppWithStateBuilder for AppProps {
                         webapi::wifi_get(&act)
                     })
                 })
-                .post(|act: Seg| async move { JsonStr(webapi::wifi_post(&act)) }),
+                .post(|act: Seg| async move { webapi::wifi_post(&act) }),
             )
             .route(
                 ("/api/alarm", parse_path_segment::<Seg>()),
                 post(|act: Seg, State(st): State<AppState>| async move {
-                    JsonStr(webapi::alarm_post(&act, &st))
+                    webapi::alarm_post(&act, &st)
                 }),
             )
             .route(

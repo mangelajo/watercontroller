@@ -91,28 +91,32 @@ pub fn api_post(seg: &str, st: &AppState, body: &[u8]) -> String {
 
 // ---- /api/wifi/<action>, /api/alarm/<action>, /api/webhooks/<action> -
 
-/// WiFi creds come from `.env` on this firmware, so scan + reconnect
-/// are accepted but inert (the SPA's setup wizard is moot here).
+/// WiFi `scan` is handled async in the route; `scan` here is a fallback
+/// (returns an empty list).
 pub fn wifi_get(action: &str) -> String {
     match action {
         "scan" => String::from(r#"{"networks":[]}"#),
         _ => String::from(NOT_FOUND),
     }
 }
-pub fn wifi_post(action: &str) -> String {
+
+/// `POST /api/wifi/reconnect` — accepted but inert (WiFi creds come
+/// from `.env`). 204 on success, matching the IDF contract.
+pub fn wifi_post(action: &str) -> crate::ApiResp {
     match action {
-        "reconnect" => String::from(r#"{"result":"ok"}"#),
-        _ => String::from(NOT_FOUND),
+        "reconnect" => crate::ApiResp::NoContent,
+        _ => crate::ApiResp::Json(String::from(NOT_FOUND)),
     }
 }
 
-pub fn alarm_post(action: &str, st: &AppState) -> String {
+/// `POST /api/alarm/clear` — clears the latched flow alarm, 204.
+pub fn alarm_post(action: &str, st: &AppState) -> crate::ApiResp {
     match action {
         "clear" => {
             st.app.clear_flow_alarm();
-            String::from(r#"{"result":"ok"}"#)
+            crate::ApiResp::NoContent
         }
-        _ => String::from(NOT_FOUND),
+        _ => crate::ApiResp::Json(String::from(NOT_FOUND)),
     }
 }
 
