@@ -440,10 +440,82 @@ def host_url(host_binary: Path | None, real_target_url: str | None):
             proc.kill()
 
 
+class _RetryingAPI:
+    """Wraps a Playwright APIRequestContext so a transient connection
+    refusal is retried instead of failing the test.
+
+    The device serves HTTP from a small fixed worker pool; when every
+    worker is mid-request a fresh TCP SYN is rejected (ECONNREFUSED).
+    During back-to-back tests that's a momentary condition, not a real
+    failure — retry a few times before giving up. Mirrors the SPA's
+    own `fetchRetry`."""
+
+    _TRANSIENT = ("ECONNREFUSED", "ECONNRESET", "socket hang up")
+
+    def __init__(self, ctx: APIRequestContext):
+        self._ctx = ctx
+
+    def _retry(self, method, url, **kwargs):
+        last = None
+        for attempt in range(5):
+            try:
+                return method(url, **kwargs)
+            except Exception as e:  # noqa: BLE001 — re-raised below
+                if not any(t in str(e) for t in self._TRANSIENT):
+                    raise
+                last = e
+                time.sleep(0.25)
+        raise last
+
+    def get(self, url, **kwargs):
+        return self._retry(self._ctx.get, url, **kwargs)
+
+    def put(self, url, **kwargs):
+        return self._retry(self._ctx.put, url, **kwargs)
+
+    def post(self, url, **kwargs):
+        return self._retry(self._ctx.post, url, **kwargs)
+
+    def __getattr__(self, name):
+        # Anything not wrapped (delete, head, dispose, …) passes through.
+        return getattr(self._ctx, name)
+
+
 @pytest.fixture
-def api_request_context(playwright: Playwright) -> APIRequestContext:
+def page(page):
+    """Override pytest-playwright's `page` so a transient
+    ERR_CONNECTION_REFUSED on navigation is retried.
+
+    `page.goto` loads the SPA shell; if it lands while the device's
+    small HTTP worker pool is saturated (previous test's connections
+    still draining) the SYN is rejected. That's momentary — retry a few
+    times. fetch()/API calls retry elsewhere (`fetchRetry`,
+    `_RetryingAPI`); this covers the browser's own navigation."""
+    _transient = ("ERR_CONNECTION_REFUSED", "ERR_CONNECTION_RESET", "ERR_CONNECTION_CLOSED")
+    _orig_goto = page.goto
+
+    def goto(url, **kwargs):
+        last = None
+        for attempt in range(5):
+            try:
+                return _orig_goto(url, **kwargs)
+            except Exception as e:  # noqa: BLE001 — re-raised below
+                if not any(t in str(e) for t in _transient):
+                    raise
+                last = e
+                time.sleep(0.3)
+        raise last
+
+    page.goto = goto
+    return page
+
+
+@pytest.fixture
+def api_request_context(playwright: Playwright):
     """A Playwright APIRequestContext for talking to /api/* directly without
-    a browser page — used for setup/teardown of config and switch state."""
+    a browser page — used for setup/teardown of config and switch state.
+    Wrapped so transient connection refusals (small device worker pool)
+    are retried rather than failing the test."""
     ctx = playwright.request.new_context()
-    yield ctx
+    yield _RetryingAPI(ctx)
     ctx.dispose()
