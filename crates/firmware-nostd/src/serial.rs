@@ -9,22 +9,30 @@
 //! the network (AP-mode fallback, or no WiFi at all), so the command
 //! set covers the recovery essentials: status, reset, alarm-clear.
 
+use alloc::sync::Arc;
+
 use esp_hal::{
     peripherals::{GPIO3, UART0},
-    uart::{Config, UartRx},
+    uart::{Config as UartConfig, UartRx},
     Async,
 };
-use watercontroller_core::{app::App, traits::WifiState};
+use watercontroller_core::{
+    app::App,
+    config::Config,
+    traits::{NvsStore, WifiState},
+};
 
 /// Run one command line. Replies via `log::info!`.
-fn handle(app: &App, line: &str) {
+fn handle(app: &App, nvs: &dyn NvsStore, line: &str) {
     let cmd = line.trim();
     if cmd.is_empty() {
         return;
     }
     match cmd {
         "help" => {
-            log::info!("serial: commands — help | status | diag | reset | alarm clear");
+            log::info!(
+                "serial: commands — help | status | diag | reset | config reset | alarm clear"
+            );
         }
         "status" => {
             let snap = app.snapshot();
@@ -64,6 +72,15 @@ fn handle(app: &App, line: &str) {
             log::info!("serial: resetting…");
             crate::ota::request_reboot();
         }
+        "config reset" => {
+            // Erase the persisted config; the next boot falls back to
+            // the compile-time defaults. Pair with `reset` to apply —
+            // lets a test harness start from a known clean state.
+            match Config::factory_reset(nvs) {
+                Ok(()) => log::info!("serial: config erased — run 'reset' to boot defaults"),
+                Err(e) => log::info!("serial: config reset failed: {:?}", e),
+            }
+        }
         "alarm clear" => {
             app.clear_flow_alarm();
             log::info!("serial: flow alarm cleared");
@@ -73,8 +90,13 @@ fn handle(app: &App, line: &str) {
 }
 
 #[embassy_executor::task]
-pub async fn serial_task(app: App, uart0: UART0<'static>, rx_gpio: GPIO3<'static>) {
-    let mut rx: UartRx<'static, Async> = match UartRx::new(uart0, Config::default()) {
+pub async fn serial_task(
+    app: App,
+    nvs: Arc<dyn NvsStore>,
+    uart0: UART0<'static>,
+    rx_gpio: GPIO3<'static>,
+) {
+    let mut rx: UartRx<'static, Async> = match UartRx::new(uart0, UartConfig::default()) {
         Ok(r) => r.with_rx(rx_gpio).into_async(),
         Err(e) => {
             log::info!("serial: UART RX init failed: {:?}", e);
@@ -94,7 +116,7 @@ pub async fn serial_task(app: App, uart0: UART0<'static>, rx_gpio: GPIO3<'static
         for &b in &buf[..n] {
             match b {
                 b'\r' | b'\n' => {
-                    handle(&app, &line);
+                    handle(&app, &*nvs, &line);
                     line.clear();
                 }
                 0x08 | 0x7f => {

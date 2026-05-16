@@ -477,7 +477,13 @@ async fn main(spawner: Spawner) -> ! {
         sensors::sensor_task(app.clone(), analog, peripherals.PCNT, peripherals.GPIO33).unwrap(),
     );
     spawner.spawn(
-        serial::serial_task(app.clone(), peripherals.UART0, peripherals.GPIO3).unwrap(),
+        serial::serial_task(
+            app.clone(),
+            state.nvs.clone(),
+            peripherals.UART0,
+            peripherals.GPIO3,
+        )
+        .unwrap(),
     );
     spawner.spawn(schedule::schedule_task(app.clone()).unwrap());
     spawner.spawn(telnet::telnet_task(stack).unwrap());
