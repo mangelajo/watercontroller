@@ -192,17 +192,27 @@ struct LogStreamer;
 impl picoserve::response::ws::WebSocketCallback for LogStreamer {
     async fn run<R: picoserve::io::Read, W: picoserve::io::Write<Error = R::Error>>(
         self,
-        _rx: picoserve::response::ws::SocketRx<R>,
+        mut rx: picoserve::response::ws::SocketRx<R>,
         mut tx: picoserve::response::ws::SocketTx<W>,
     ) -> Result<(), W::Error> {
+        use picoserve::futures::Either;
         let mut sub = match logbuf::subscriber() {
             // All subscriber slots taken — close rather than block.
             None => return Ok(()),
             Some(s) => s,
         };
+        // `next_message` races the client read against the next log
+        // line, so a client disconnect is detected at once — the web
+        // worker frees immediately instead of staying parked until the
+        // next log line fails to send. The SPA only ever sends a Close.
+        let mut rx_buf = [0u8; 128];
         loop {
-            let line = sub.next_message_pure().await;
-            tx.send_text(&line).await?;
+            match rx.next_message(&mut rx_buf, sub.next_message_pure()).await {
+                // Inbound frame (Close) or read error — end the stream.
+                Ok(Either::First(_)) | Err(_) => return Ok(()),
+                // A log line is ready — forward it.
+                Ok(Either::Second(line)) => tx.send_text(&line).await?,
+            }
         }
     }
 }
@@ -311,7 +321,13 @@ static SERVER_CONFIG: picoserve::Config = picoserve::Config::new(picoserve::Time
 })
 .keep_connection_alive();
 
-const WEB_TASK_POOL_SIZE: usize = 4;
+// Each `web_task` future is ~19 KiB of static RAM, so the pool is kept
+// lean. The SPA is tuned to match: it polls lightly and only holds the
+// `/ws/logs` socket open while the Logs tab is in view. 3 is the
+// minimum that reliably serves one browser — a browser opens a few
+// parallel connections per page load, so 2 isn't enough. Down from 4
+// (the freed DRAM leaves headroom for future features).
+const WEB_TASK_POOL_SIZE: usize = 3;
 
 #[embassy_executor::task(pool_size = WEB_TASK_POOL_SIZE)]
 async fn web_task(

@@ -771,7 +771,7 @@
       <section class="card full">
         <h2>Diagnostics (auto-refresh)</h2>
         <p class="status-msg">Live heap and per-task stack high-water marks from
-          <code>/api/diag</code>. Refreshes every 3 seconds while this tab is open.
+          <code>/api/diag</code>. Refreshes every 5 seconds while this tab is open.
           Useful for spotting memory pressure (low <em>min ever free</em>) or tasks
           dangerously close to overflowing their stack (low <em>stack free</em>).</p>
         <div class="grid2" id="diag-heap">
@@ -1003,19 +1003,20 @@
       ]);
       if (SETTINGS_TABS.has(tab) && !currentConfig) loadConfig();
       setDiagPolling(tab === "advanced");
+      setLogsConnection(tab === "logs");
       // Webhooks aren't part of the main config blob — fetch on tab open.
       if (tab === "webhooks") loadWebhooks();
     });
   }
 
   // ---- Diagnostics (Advanced tab) ----
-  // Polls /api/diag every 3 s, but ONLY while the Advanced tab is open —
+  // Polls /api/diag every 5 s, but ONLY while the Advanced tab is open —
   // otherwise we'd be hammering the device for nothing.
   let diagTimer = null;
   function setDiagPolling(on) {
     if (on && !diagTimer) {
       refreshDiag();
-      diagTimer = setInterval(refreshDiag, 3000);
+      diagTimer = setInterval(refreshDiag, 5000);
     } else if (!on && diagTimer) {
       clearInterval(diagTimer); diagTimer = null;
     }
@@ -1056,9 +1057,26 @@
   }
 
   // ---- Logs (WebSocket) ----
+  // The log stream pins one server HTTP worker for as long as it's open.
+  // The worker pool is small, so the socket is opened only while the
+  // Logs tab is in view and closed on leaving it — freeing that worker
+  // for the rest of the SPA the rest of the time.
+  let logsWs = null;
+  let logsWanted = false;
+  function setLogsConnection(on) {
+    logsWanted = on;
+    if (on && !logsWs) {
+      connectLogs();
+    } else if (!on && logsWs) {
+      const ws = logsWs;
+      logsWs = null;
+      ws.close();
+    }
+  }
   function connectLogs() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(proto + "//" + location.host + "/ws/logs");
+    logsWs = ws;
     const pre = $("#logs-pane");
     ws.onmessage = (ev) => {
       const line = document.createElement("div");
@@ -1071,12 +1089,18 @@
       while (pre.childElementCount > 500) pre.removeChild(pre.firstChild);
       pre.scrollTop = pre.scrollHeight;
     };
-    ws.onclose = () => setTimeout(connectLogs, 2000);
+    ws.onclose = () => {
+      if (logsWs === ws) logsWs = null;
+      // Reconnect only while the Logs tab is still in view.
+      if (logsWanted) setTimeout(connectLogs, 2000);
+    };
   }
-  connectLogs();
 
+  // Status poll: 5 s is responsive enough for a water controller and
+  // keeps the request rate low so the small HTTP worker pool isn't
+  // hammered. Switch toggles still refresh immediately on action.
   refreshStatus();
-  setInterval(refreshStatus, 2000);
+  setInterval(refreshStatus, 5000);
 
   // ---- Loading modal ----
   // Shown while a fetch that populates a whole tab is in flight, so the
