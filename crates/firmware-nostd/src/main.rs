@@ -32,6 +32,7 @@ mod sensors;
 mod sntp;
 mod webapi;
 mod webhook;
+mod wifiscan;
 
 use alloc::{string::String, sync::Arc};
 
@@ -222,8 +223,14 @@ impl AppWithStateBuilder for AppProps {
             )
             .route(
                 ("/api/wifi", parse_path_segment::<Seg>()),
-                get(|act: Seg| async move { JsonStr(webapi::wifi_get(&act)) })
-                    .post(|act: Seg| async move { JsonStr(webapi::wifi_post(&act)) }),
+                get(|act: Seg| async move {
+                    JsonStr(if act.as_str() == "scan" {
+                        wifiscan::request_scan().await
+                    } else {
+                        webapi::wifi_get(&act)
+                    })
+                })
+                .post(|act: Seg| async move { JsonStr(webapi::wifi_post(&act)) }),
             )
             .route(
                 ("/api/alarm", parse_path_segment::<Seg>()),
@@ -415,17 +422,68 @@ async fn main(spawner: Spawner) -> ! {
 
 #[embassy_executor::task]
 async fn connection_task(mut controller: WifiController<'static>) {
+    use embassy_futures::select::{select, Either};
     log::info!("wifi: connection task started");
     loop {
         match controller.connect_async().await {
             Ok(info) => {
                 log::info!("wifi: connected: {:?}", info);
-                let why = controller.wait_for_disconnect_async().await.ok();
-                log::info!("wifi: disconnected: {:?}", why);
+                // Stay connected; serve scan requests in between. The
+                // disconnect wait only borrows `&controller`, so it
+                // composes with the scan-request signal — and once the
+                // signal wins, that borrow is released for the `&mut`
+                // `scan_async` call.
+                loop {
+                    match select(
+                        controller.wait_for_disconnect_async(),
+                        wifiscan::SCAN_REQ.wait(),
+                    )
+                    .await
+                    {
+                        Either::First(why) => {
+                            log::info!("wifi: disconnected: {:?}", why.ok());
+                            break;
+                        }
+                        Either::Second(()) => {
+                            let results = match controller
+                                .scan_async(&esp_radio::wifi::scan::ScanConfig::default())
+                                .await
+                            {
+                                Ok(aps) => aps.iter().map(ap_to_result).collect(),
+                                Err(e) => {
+                                    log::info!("wifi: scan failed: {:?}", e);
+                                    alloc::vec::Vec::new()
+                                }
+                            };
+                            log::info!("wifi: scan found {} AP(s)", results.len());
+                            wifiscan::SCAN_RESULT.signal(results);
+                        }
+                    }
+                }
             }
             Err(e) => log::info!("wifi: connect failed: {:?}", e),
         }
         Timer::after(Duration::from_secs(5)).await;
+    }
+}
+
+/// Convert an esp-radio scan entry into the SPA's `WifiScanResult`.
+fn ap_to_result(
+    ap: &esp_radio::wifi::ap::AccessPointInfo,
+) -> watercontroller_core::api::WifiScanResult {
+    use esp_radio::wifi::AuthenticationMethod as A;
+    let auth = match ap.auth_method {
+        None | Some(A::None) => "open",
+        Some(A::Wep) => "wep",
+        Some(A::Wpa) => "wpa",
+        Some(A::Wpa2Personal) | Some(A::WpaWpa2Personal) | Some(A::Wpa2Enterprise) => "wpa2",
+        Some(_) => "wpa3",
+    };
+    watercontroller_core::api::WifiScanResult {
+        ssid: String::from(ap.ssid.as_str()),
+        rssi_dbm: ap.signal_strength,
+        auth: String::from(auth),
+        channel: ap.channel,
     }
 }
 
