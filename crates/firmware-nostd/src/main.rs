@@ -28,8 +28,11 @@ mod mdns;
 mod mqtt;
 mod nvs;
 mod ota;
+mod schedule;
 mod sensors;
+mod serial;
 mod sntp;
+mod telnet;
 mod webapi;
 mod webhook;
 mod wifiscan;
@@ -90,10 +93,30 @@ const BASE_EPOCH_S: i64 = 1_778_803_200; // 2026-05-15T00:00:00Z
 
 static mut BOOT_INSTANT: Option<Instant> = None;
 
+/// Latest WiFi RSSI sample (dBm), taken every ~30 s by `connection_task`.
+/// 0 = unknown (no link, or not sampled yet) — a real RSSI is negative.
+static WIFI_RSSI: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+
+/// SSID of the network `connection_task` is currently joined to. The
+/// heartbeat reports this so the dashboard shows the real AP rather
+/// than always the first configured network. Empty until first connect.
+static CONNECTED_SSID: embassy_sync::mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    heapless::String<33>,
+> = embassy_sync::mutex::Mutex::new(heapless::String::new());
+
 pub(crate) fn uptime_secs() -> u64 {
     unsafe { BOOT_INSTANT }
         .map(|t| (Instant::now() - t).as_secs())
         .unwrap_or(0)
+}
+
+/// Human-readable reason for the last reset, for `/api/diag`.
+fn reset_reason_str() -> String {
+    match esp_hal::system::reset_reason() {
+        Some(r) => alloc::format!("{:?}", r),
+        None => String::from("unknown"),
+    }
 }
 
 struct EmbassyClock;
@@ -172,9 +195,13 @@ impl picoserve::response::ws::WebSocketCallback for LogStreamer {
         _rx: picoserve::response::ws::SocketRx<R>,
         mut tx: picoserve::response::ws::SocketTx<W>,
     ) -> Result<(), W::Error> {
-        let ch = logbuf::channel();
+        let mut sub = match logbuf::subscriber() {
+            // All subscriber slots taken — close rather than block.
+            None => return Ok(()),
+            Some(s) => s,
+        };
         loop {
-            let line = ch.receive().await;
+            let line = sub.next_message_pure().await;
             tx.send_text(&line).await?;
         }
     }
@@ -416,13 +443,13 @@ async fn main(spawner: Spawner) -> ! {
     let (stack, runner) = embassy_net::new(
         wifi_iface,
         net_cfg,
-        mk_static!(StackResources<14>, StackResources::<14>::new()),
+        mk_static!(StackResources<16>, StackResources::<16>::new()),
         seed,
     );
 
     let router = mk_static!(AppRouter<AppProps>, AppProps.build_app());
 
-    spawner.spawn(connection_task(controller).unwrap());
+    spawner.spawn(connection_task(controller, app.clone()).unwrap());
     spawner.spawn(net_task(runner).unwrap());
     spawner.spawn(heartbeat(app.clone(), stack).unwrap());
     spawner.spawn(tick_task(app.clone(), valve_pins).unwrap());
@@ -433,6 +460,11 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(
         sensors::sensor_task(app.clone(), analog, peripherals.PCNT, peripherals.GPIO33).unwrap(),
     );
+    spawner.spawn(
+        serial::serial_task(app.clone(), peripherals.UART0, peripherals.GPIO3).unwrap(),
+    );
+    spawner.spawn(schedule::schedule_task(app.clone()).unwrap());
+    spawner.spawn(telnet::telnet_task(stack).unwrap());
     spawner.spawn(mdns::mdns_task(stack, app).unwrap());
     for id in 0..WEB_TASK_POOL_SIZE {
         spawner.spawn(web_task(id, stack, router, state).unwrap());
@@ -446,30 +478,71 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 #[embassy_executor::task]
-async fn connection_task(mut controller: WifiController<'static>) {
-    use embassy_futures::select::{select, Either};
+async fn connection_task(mut controller: WifiController<'static>, app: App) {
+    use embassy_futures::select::{select3, Either3};
     log::info!("wifi: connection task started");
+    // Round-robin over the configured networks: each failed attempt
+    // advances to the next, so a dead/renamed AP doesn't wedge us.
+    let mut idx = 0usize;
     loop {
+        let networks = app.config().wifi.networks.clone();
+        if networks.is_empty() {
+            log::warn!("wifi: no networks configured");
+            Timer::after(Duration::from_secs(15)).await;
+            continue;
+        }
+        idx %= networks.len();
+        let net = networks[idx].clone();
+        let sta = WifiConfig::Station(
+            StationConfig::default()
+                .with_ssid(net.ssid.as_str())
+                .with_password(net.password.as_str().into()),
+        );
+        if let Err(e) = controller.set_config(&sta) {
+            log::info!("wifi: set_config '{}' failed: {:?}", net.ssid, e);
+            idx += 1;
+            Timer::after(Duration::from_secs(3)).await;
+            continue;
+        }
+        log::info!(
+            "wifi: connecting to '{}' ({}/{})",
+            net.ssid,
+            idx + 1,
+            networks.len(),
+        );
         match controller.connect_async().await {
             Ok(info) => {
                 log::info!("wifi: connected: {:?}", info);
+                {
+                    let mut g = CONNECTED_SSID.lock().await;
+                    g.clear();
+                    let _ = g.push_str(&net.ssid);
+                }
                 // Stay connected; serve scan requests in between. The
                 // disconnect wait only borrows `&controller`, so it
                 // composes with the scan-request signal — and once the
                 // signal wins, that borrow is released for the `&mut`
                 // `scan_async` call.
                 loop {
-                    match select(
+                    match select3(
                         controller.wait_for_disconnect_async(),
                         wifiscan::SCAN_REQ.wait(),
+                        Timer::after(Duration::from_secs(30)),
                     )
                     .await
                     {
-                        Either::First(why) => {
+                        Either3::First(why) => {
                             log::info!("wifi: disconnected: {:?}", why.ok());
+                            WIFI_RSSI.store(0, core::sync::atomic::Ordering::Relaxed);
                             break;
                         }
-                        Either::Second(()) => {
+                        Either3::Third(()) => {
+                            // Periodic link-quality sample for /api/diag.
+                            if let Ok(r) = controller.rssi() {
+                                WIFI_RSSI.store(r, core::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                        Either3::Second(()) => {
                             let results = match controller
                                 .scan_async(&esp_radio::wifi::scan::ScanConfig::default())
                                 .await
@@ -486,7 +559,10 @@ async fn connection_task(mut controller: WifiController<'static>) {
                     }
                 }
             }
-            Err(e) => log::info!("wifi: connect failed: {:?}", e),
+            Err(e) => {
+                log::info!("wifi: connect to '{}' failed: {:?}", net.ssid, e);
+                idx += 1;
+            }
         }
         Timer::after(Duration::from_secs(5)).await;
     }
@@ -522,9 +598,20 @@ async fn net_task(mut runner: Runner<'static, Interface<'static>>) { runner.run(
 #[embassy_executor::task]
 async fn heartbeat(app: App, stack: Stack<'static>) {
     let mut secs = 0u64;
+    let reset_reason = reset_reason_str();
+    let mut min_free = usize::MAX;
     loop {
         let free = esp_alloc::HEAP.free();
         let used = esp_alloc::HEAP.used();
+        min_free = min_free.min(free);
+        let conn_ssid = {
+            let g = CONNECTED_SSID.lock().await;
+            if g.is_empty() {
+                String::from(SSID)
+            } else {
+                String::from(g.as_str())
+            }
+        };
         let wifi = match stack.config_v4() {
             Some(c) => {
                 log::info!(
@@ -532,7 +619,7 @@ async fn heartbeat(app: App, stack: Stack<'static>) {
                     secs, free, used, c.address.address()
                 );
                 Some(WifiState::Connected {
-                    ssid: String::from(SSID),
+                    ssid: conn_ssid,
                     ip: alloc::format!("{}", c.address.address()),
                 })
             }
@@ -541,11 +628,18 @@ async fn heartbeat(app: App, stack: Stack<'static>) {
                 Some(WifiState::Disconnected)
             }
         };
+        let rssi = match WIFI_RSSI.load(core::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            v => Some(v as i8),
+        };
         app.update_state(|s| {
             s.uptime_ms = secs * 1000;
             s.firmware_version = String::from("wc-nostd");
             s.diagnostics.free_heap_bytes = Some(free as u32);
+            s.diagnostics.min_free_heap_bytes = Some(min_free as u32);
+            s.diagnostics.reset_reason = Some(reset_reason.clone());
             s.network.wifi = wifi;
+            s.network.wifi_rssi_dbm = rssi;
             s.network.mqtt_connected =
                 mqtt::MQTT_UP.load(core::sync::atomic::Ordering::Relaxed);
         });
