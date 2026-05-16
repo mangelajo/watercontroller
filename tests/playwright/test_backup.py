@@ -17,9 +17,7 @@ Playwright can't drive on a headless host).
 from __future__ import annotations
 
 import json
-import os
 
-import pytest
 from playwright.sync_api import Page, expect
 
 
@@ -148,11 +146,8 @@ def test_advanced_upload_button_restores_config(host_url, page: Page):
     assert cfg["timezone"] == "America/New_York"
 
 
-# ---------- skip when running against real device ----------------------
-# Real-device tests aren't useful here: the device's NVS is sticky and
-# we don't want to leave it with `_backup_test_` SSIDs.
-
-pytestmark = pytest.mark.skipif(
-    os.environ.get("JUMPSTARTER_HOST") is not None,
-    reason="backup tests mutate config and can leave state on real device",
-)
+# ---------- real-device note --------------------------------------------
+# These tests mutate the persisted config. They are safe to run against
+# real hardware because conftest's `_clean_device_config` session
+# teardown erases the NVS config afterwards (serial `config reset`, or
+# POST /api/factory_reset) — the board is left on compile-time defaults.

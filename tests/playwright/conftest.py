@@ -275,6 +275,49 @@ def _post_test_diag(request, real_target_url, term):
     term(_format_diag(d, request.node.name))
 
 
+def _erase_device_config(url: str | None, console, log) -> None:
+    """Erase the device's persisted (NVS) config so it next boots on
+    compile-time defaults — keeps NVS-mutating tests (backup/restore,
+    config round-trips) from leaving the board, or the next run, with
+    junk WiFi creds.
+
+    Prefers the serial `config reset` CLI command — it works even when a
+    bad config has wedged WiFi/HTTP. Falls back to POST
+    /api/factory_reset when no serial console is attached."""
+    if console is not None:
+        log("config-reset: erasing NVS config via serial 'config reset'")
+        try:
+            console.sendline("config reset")
+            console.expect(rb"config erased", timeout=10)
+        except Exception as e:
+            log(f"config-reset: serial reset failed ({e})")
+        return
+    if url:
+        import urllib.request
+
+        log("config-reset: erasing NVS config via POST /api/factory_reset")
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(f"{url}/api/factory_reset", method="POST"),
+                timeout=5,
+            )
+        except Exception:
+            # factory_reset reboots the device, so the HTTP response
+            # frequently never completes — that's expected, not a failure.
+            pass
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _clean_device_config(real_target_url, device_console, term):
+    """Session teardown: erase the device's persisted config so the box
+    is left on defaults. Lets the NVS-mutating tests run against real
+    hardware without stranding it (or the next run) in a dirty state.
+    No-op when not running against a real device."""
+    yield
+    if real_target_url:
+        _erase_device_config(real_target_url, device_console, term)
+
+
 @pytest.fixture(scope="session")
 def on_real_device(real_target_url) -> bool:
     """`True` when tests are running against a flashed ESP32 (either via
