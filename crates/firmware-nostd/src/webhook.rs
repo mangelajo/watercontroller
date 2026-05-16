@@ -24,7 +24,6 @@ use embassy_sync::{
 };
 use embassy_time::{Duration, Timer};
 use embedded_io_async::Write as _;
-use esp_println::println;
 use watercontroller_core::{
     app::App,
     webhook::{render_template, WebhookConfig, WebhookDispatcher, WebhookEvent},
@@ -52,7 +51,7 @@ impl EmbassyWebhookDispatcher {
 impl WebhookDispatcher for EmbassyWebhookDispatcher {
     fn dispatch(&self, event: WebhookEvent) {
         if self.tx.try_send(event).is_err() {
-            println!("webhook: queue full, dropping event");
+            log::info!("webhook: queue full, dropping event");
         }
     }
 }
@@ -81,7 +80,7 @@ async fn handle_event(app: &App, stack: Stack<'static>, event: WebhookEvent) {
     if subs.is_empty() {
         return;
     }
-    println!(
+    log::info!(
         "webhook: dispatching {} to {} subscriber(s)",
         kind.as_str(),
         subs.len()
@@ -90,12 +89,12 @@ async fn handle_event(app: &App, stack: Stack<'static>, event: WebhookEvent) {
         let body = render_template(&wh.body_template, &event.vars);
         match deliver(stack, wh, &body).await {
             Ok(status) if (200..300).contains(&status) => {
-                println!("webhook: {} -> {} OK ({})", kind.as_str(), wh.url, status)
+                log::info!("webhook: {} -> {} OK ({})", kind.as_str(), wh.url, status)
             }
             Ok(status) => {
-                println!("webhook: {} -> {} HTTP {}", kind.as_str(), wh.url, status)
+                log::info!("webhook: {} -> {} HTTP {}", kind.as_str(), wh.url, status)
             }
-            Err(e) => println!("webhook: {} -> {} failed: {}", kind.as_str(), wh.url, e),
+            Err(e) => log::info!("webhook: {} -> {} failed: {}", kind.as_str(), wh.url, e),
         }
     }
 }

@@ -46,7 +46,7 @@ rust-mqtt            = { version = "0.3", default-features = false }
 embedded-io-async-06 = { package = "embedded-io-async", version = "0.6" }
 embedded-io-async    = "0.7"
 
-picoserve            = { version = "0.18", features = ["embassy", "json", "log", "alloc"] }
+picoserve            = { version = "0.18", features = ["embassy", "json", "log", "alloc", "ws"] }
 serde                = { version = "1", default-features = false, features = ["derive"] }
 # alloc-backed JSON serialization for the API responses (Config is too
 # big/nested for serde-json-core's fixed-buffer serializer).
@@ -75,6 +75,8 @@ mbedtls-rs           = { git = "https://github.com/esp-rs/esp-mbedtls", rev = "1
 log                  = "0.4"
 heapless             = "0.8"
 critical-section     = "1"
+# `Adc::read_oneshot` is an `nb` (non-blocking) API; we spin on it.
+nb                   = "1"
 # 64-bit atomic for the SNTP epoch offset — the ESP32 (Xtensa LX6) has
 # no native 64-bit atomics; the `critical-section` feature emulates it.
 portable-atomic      = { version = "1", features = ["critical-section"] }

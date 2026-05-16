@@ -16,7 +16,6 @@ use embassy_net::{
     IpAddress, Stack,
 };
 use embassy_time::{Duration, Timer};
-use esp_println::println;
 use heapless::{String, Vec};
 use watercontroller_core::app::App;
 
@@ -36,7 +35,7 @@ pub async fn mdns_task(stack: Stack<'static>, app: App) {
         String::try_from(cfg.wifi.hostname.as_str()).unwrap_or_default()
     };
     if hostname.is_empty() {
-        println!("mdns: empty hostname, responder disabled");
+        log::info!("mdns: empty hostname, responder disabled");
         return;
     }
 
@@ -48,7 +47,7 @@ pub async fn mdns_task(stack: Stack<'static>, app: App) {
         Timer::after(Duration::from_millis(500)).await;
     };
     if let Err(e) = stack.join_multicast_group(MDNS_GROUP) {
-        println!("mdns: join_multicast_group failed: {:?}", e);
+        log::info!("mdns: join_multicast_group failed: {:?}", e);
         return;
     }
 
@@ -64,10 +63,10 @@ pub async fn mdns_task(stack: Stack<'static>, app: App) {
         &mut tx_buf,
     );
     if socket.bind(MDNS_PORT).is_err() {
-        println!("mdns: bind :5353 failed");
+        log::info!("mdns: bind :5353 failed");
         return;
     }
-    println!("mdns: responding for {}.local", hostname.as_str());
+    log::info!("mdns: responding for {}.local", hostname.as_str());
 
     let octets = ipv4.octets();
     let mut pkt = [0u8; 512];

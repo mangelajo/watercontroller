@@ -29,7 +29,6 @@ use esp_bootloader_esp_idf::{
         PARTITION_TABLE_MAX_LEN,
     },
 };
-use esp_println::println;
 use esp_storage::FlashStorage;
 use picoserve::{
     extract::FromRequest,
@@ -87,10 +86,10 @@ pub fn confirm_running(flash: &crate::nvs::FlashKv) {
         match OtaUpdater::new(f, &mut buf) {
             Ok(mut u) => {
                 if let Err(e) = u.set_current_ota_state(OtaImageState::Valid) {
-                    println!("ota: confirm_running failed: {:?}", e);
+                    log::info!("ota: confirm_running failed: {:?}", e);
                 }
             }
-            Err(e) => println!("ota: confirm_running: no OTA metadata: {:?}", e),
+            Err(e) => log::info!("ota: confirm_running: no OTA metadata: {:?}", e),
         }
     });
 }
@@ -104,7 +103,7 @@ pub fn request_reboot() {
 #[embassy_executor::task]
 pub async fn reboot_task() {
     OTA_REBOOT.wait().await;
-    println!("ota: reboot requested");
+    log::info!("ota: reboot requested");
     // Let the HTTP response flush to the client before we drop the link.
     Timer::after(Duration::from_millis(800)).await;
     esp_hal::system::software_reset();
@@ -152,7 +151,7 @@ async fn write_image<R: picoserve::io::Read>(
     if total as u32 > slot_len {
         return OtaReport::err("image larger than OTA partition");
     }
-    println!("ota: receiving {} bytes -> slot @ {:#x}", total, offset);
+    log::info!("ota: receiving {} bytes -> slot @ {:#x}", total, offset);
 
     let mut reader = body.reader();
     let mut sector = vec![0u8; SECTOR];
@@ -167,13 +166,13 @@ async fn write_image<R: picoserve::io::Read>(
                 Ok(0) => break,
                 Ok(n) => filled += n,
                 Err(_) => {
-                    println!("ota: read error at {} / {} bytes", written + filled, total);
+                    log::info!("ota: read error at {} / {} bytes", written + filled, total);
                     return OtaReport::err("read error mid-stream");
                 }
             }
         }
         if filled == 0 {
-            println!("ota: stream ended early at {} / {} bytes", written, total);
+            log::info!("ota: stream ended early at {} / {} bytes", written, total);
             return OtaReport::err("stream ended early");
         }
         let chunk_off = offset + written as u32;
@@ -182,12 +181,12 @@ async fn write_image<R: picoserve::io::Read>(
             f.write(chunk_off, &sector[..filled])
         });
         if write_res.is_err() {
-            println!("ota: flash write failed at {:#x}", chunk_off);
+            log::info!("ota: flash write failed at {:#x}", chunk_off);
             return OtaReport::err("flash write failed");
         }
         written += filled;
         if written >= next_log {
-            println!("ota: {} / {} bytes written", written, total);
+            log::info!("ota: {} / {} bytes written", written, total);
             next_log += 256 * 1024;
         }
     }
@@ -195,7 +194,7 @@ async fn write_image<R: picoserve::io::Read>(
     if let Err(e) = state.flash_kv.with_flash(activate_inactive_slot) {
         return OtaReport::err(alloc::format!("activate failed: {:?}", e));
     }
-    println!("ota: {} bytes written + activated", written);
+    log::info!("ota: {} bytes written + activated", written);
     request_reboot();
     OtaReport { ok: true, detail: alloc::format!("{} bytes, rebooting", written) }
 }

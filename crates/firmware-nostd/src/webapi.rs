@@ -31,7 +31,7 @@ const NOT_FOUND: &str = r#"{"error":"unknown endpoint"}"#;
 
 // ---- /api/<seg> ------------------------------------------------------
 
-pub fn api_get(seg: &str, st: &AppState) -> String {
+pub fn api_get(seg: &str, st: &AppState, all: bool) -> String {
     match seg {
         "diag" => alloc::format!(
             r#"{{"uptime_s":{},"heap":{{"total_free_bytes":{},"total_used_bytes":{}}},"fw":"wc-nostd"}}"#,
@@ -43,9 +43,14 @@ pub fn api_get(seg: &str, st: &AppState) -> String {
         // are returned bare — not wrapped — matching the IDF firmware.
         "status" => serde_json::to_string(&st.app.snapshot()).unwrap_or_default(),
         "config" => {
-            // Secrets are redacted — the SPA never needs them back.
             let cfg = st.app.config();
-            serde_json::to_string(&cfg.redact_secrets_for_api()).unwrap_or_default()
+            if all {
+                // `?all` — full config incl. secrets, for the SPA's
+                // backup download.
+                serde_json::to_string(&*cfg).unwrap_or_default()
+            } else {
+                serde_json::to_string(&cfg.redact_secrets_for_api()).unwrap_or_default()
+            }
         }
         _ => String::from(NOT_FOUND),
     }

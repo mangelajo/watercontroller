@@ -23,10 +23,12 @@
 
 extern crate alloc;
 
+mod logbuf;
 mod mdns;
 mod mqtt;
 mod nvs;
 mod ota;
+mod sensors;
 mod sntp;
 mod webapi;
 mod webhook;
@@ -45,7 +47,6 @@ use esp_hal::{
     rng::Rng,
     timer::timg::TimerGroup,
 };
-use esp_println::println;
 use esp_radio::wifi::{
     sta::StationConfig, Config as WifiConfig, ControllerConfig, Interface, WifiController,
 };
@@ -134,10 +135,37 @@ pub(crate) struct AppState {
     pub(crate) flash_kv: Arc<FlashKv>,
 }
 
+/// WebSocket callback for `/ws/logs` — streams every log line from the
+/// `logbuf` channel to the client. A client disconnect surfaces as a
+/// send error, which ends the loop.
+struct LogStreamer;
+
+impl picoserve::response::ws::WebSocketCallback for LogStreamer {
+    async fn run<R: picoserve::io::Read, W: picoserve::io::Write<Error = R::Error>>(
+        self,
+        _rx: picoserve::response::ws::SocketRx<R>,
+        mut tx: picoserve::response::ws::SocketTx<W>,
+    ) -> Result<(), W::Error> {
+        let ch = logbuf::channel();
+        loop {
+            let line = ch.receive().await;
+            tx.send_text(&line).await?;
+        }
+    }
+}
+
 struct AppProps;
 
 /// Path-segment capture type for the generic `/api` routes.
 type Seg = heapless::String<24>;
+
+/// Query-string flags. `GET /api/config?all=1` opts into the full
+/// (un-redacted) config for the SPA's backup download.
+#[derive(serde::Deserialize)]
+struct ApiQuery {
+    #[serde(default)]
+    all: Option<String>,
+}
 
 impl AppWithStateBuilder for AppProps {
     type State = AppState;
@@ -154,6 +182,12 @@ impl AppWithStateBuilder for AppProps {
         picoserve::Router::new()
             .route("/", get_service(File::html(SPA_HTML)))
             .route(
+                "/ws/logs",
+                get(|upgrade: picoserve::response::ws::WebSocketUpgrade| async move {
+                    upgrade.on_upgrade(LogStreamer)
+                }),
+            )
+            .route(
                 "/api/ota",
                 post(|report: ota::OtaReport| async move {
                     if report.ok {
@@ -167,8 +201,8 @@ impl AppWithStateBuilder for AppProps {
             )
             .route(
                 ("/api", parse_path_segment::<Seg>()),
-                get(|seg: Seg, State(st): State<AppState>| async move {
-                    JsonStr(webapi::api_get(&seg, &st))
+                get(|seg: Seg, State(st): State<AppState>, q: picoserve::extract::Query<ApiQuery>| async move {
+                    JsonStr(webapi::api_get(&seg, &st, q.0.all.is_some()))
                 })
                 .put(|seg: Seg, State(st): State<AppState>, body: alloc::vec::Vec<u8>| async move {
                     JsonStr(webapi::api_put(&seg, &st, &body))
@@ -275,11 +309,17 @@ async fn tick_task(app: App, mut pins: ValvePins) {
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    esp_println::logger::init_logger_from_env();
+    logbuf::init();
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::_80MHz));
 
+    // The reclaimed-RAM pool (64 KiB) sits in a separate segment; the
+    // regular pool shares the RWDATA segment with the executor stack,
+    // so it's kept small — 16 KiB — to leave the stack room. picoserve
+    // polls its deeply-nested router on that stack and a route per
+    // endpoint plus a serde_json `Config` deserialize would otherwise
+    // trip the stack guard.
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
-    esp_alloc::heap_allocator!(size: 36 * 1024);
+    esp_alloc::heap_allocator!(size: 16 * 1024);
 
     unsafe { BOOT_INSTANT = Some(Instant::now()); }
 
@@ -287,7 +327,7 @@ async fn main(spawner: Spawner) -> ! {
     let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
-    println!("wc-nostd: boot");
+    log::info!("wc-nostd: boot");
 
     // Flash-backed NVS. Config is restored from it (or compile-time
     // defaults on a blank store / parse failure). The same `FlashKv`
@@ -299,7 +339,7 @@ async fn main(spawner: Spawner) -> ! {
     // so a just-OTA'd slot is marked Valid).
     ota::confirm_running(&flash_kv);
     let config = Config::load(&*nvs).unwrap_or_else(|_| {
-        println!("nvs: no stored config, using defaults");
+        log::info!("nvs: no stored config, using defaults");
         Config::default()
     });
 
@@ -316,6 +356,9 @@ async fn main(spawner: Spawner) -> ! {
         valve_close: Output::new(peripherals.GPIO27, Level::Low, oc),
         drain: Output::new(peripherals.GPIO25, Level::Low, oc),
     };
+
+    // Analog sensors: ADC1 on GPIO36 (battery) + GPIO32 (pressure).
+    let analog = sensors::Analog::new(peripherals.ADC1, peripherals.GPIO36, peripherals.GPIO32);
 
     let state: &'static AppState =
         mk_static!(AppState, AppState { app: app.clone(), nvs, flash_kv });
@@ -355,12 +398,15 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(sntp::sntp_task(stack).unwrap());
     spawner.spawn(webhook::webhook_task(app.clone(), stack).unwrap());
     spawner.spawn(ota::reboot_task().unwrap());
+    spawner.spawn(
+        sensors::sensor_task(app.clone(), analog, peripherals.PCNT, peripherals.GPIO33).unwrap(),
+    );
     spawner.spawn(mdns::mdns_task(stack, app).unwrap());
     for id in 0..WEB_TASK_POOL_SIZE {
         spawner.spawn(web_task(id, stack, router, state).unwrap());
     }
 
-    println!("wc-nostd: listening on :80 (SPA + /api/*)");
+    log::info!("wc-nostd: listening on :80 (SPA + /api/*)");
 
     loop {
         Timer::after(Duration::from_secs(60)).await;
@@ -369,15 +415,15 @@ async fn main(spawner: Spawner) -> ! {
 
 #[embassy_executor::task]
 async fn connection_task(mut controller: WifiController<'static>) {
-    println!("wifi: connection task started");
+    log::info!("wifi: connection task started");
     loop {
         match controller.connect_async().await {
             Ok(info) => {
-                println!("wifi: connected: {:?}", info);
+                log::info!("wifi: connected: {:?}", info);
                 let why = controller.wait_for_disconnect_async().await.ok();
-                println!("wifi: disconnected: {:?}", why);
+                log::info!("wifi: disconnected: {:?}", why);
             }
-            Err(e) => println!("wifi: connect failed: {:?}", e),
+            Err(e) => log::info!("wifi: connect failed: {:?}", e),
         }
         Timer::after(Duration::from_secs(5)).await;
     }
@@ -398,7 +444,7 @@ async fn heartbeat(app: App, stack: Stack<'static>) {
         let used = esp_alloc::HEAP.used();
         let wifi = match stack.config_v4() {
             Some(c) => {
-                println!(
+                log::info!(
                     "alive uptime={}s heap_free={} heap_used={} ip={}",
                     secs, free, used, c.address.address()
                 );
@@ -408,7 +454,7 @@ async fn heartbeat(app: App, stack: Stack<'static>) {
                 })
             }
             None => {
-                println!("alive uptime={}s heap_free={} heap_used={} ip=<none>", secs, free, used);
+                log::info!("alive uptime={}s heap_free={} heap_used={} ip=<none>", secs, free, used);
                 Some(WifiState::Disconnected)
             }
         };

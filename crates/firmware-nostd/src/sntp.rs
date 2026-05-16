@@ -15,7 +15,6 @@ use embassy_net::{
     IpEndpoint, Stack,
 };
 use embassy_time::{Duration, Timer};
-use esp_println::println;
 use portable_atomic::{AtomicI64, Ordering};
 
 /// Unix epoch (seconds) at the instant the firmware booted. 0 means
@@ -43,11 +42,11 @@ pub async fn sntp_task(stack: Stack<'static>) {
             Ok(unix_now) => {
                 let at_boot = unix_now as i64 - crate::uptime_secs() as i64;
                 EPOCH_AT_BOOT.store(at_boot, Ordering::Relaxed);
-                println!("sntp: synced, unix now {}", unix_now);
+                log::info!("sntp: synced, unix now {}", unix_now);
                 Timer::after(RESYNC).await;
             }
             Err(e) => {
-                println!("sntp: sync failed ({}), retry in 30 s", e);
+                log::info!("sntp: sync failed ({}), retry in 30 s", e);
                 Timer::after(RETRY).await;
             }
         }

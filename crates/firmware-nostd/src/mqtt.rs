@@ -53,7 +53,6 @@ mod eio_compat {
 use eio_compat::Compat;
 use embassy_time::{Duration, Timer};
 use embassy_futures::select::{select, Either};
-use esp_println::println;
 use rust_mqtt::{
     client::{client::MqttClient, client_config::ClientConfig},
     packet::v5::{publish_packet::QualityOfService, reason_codes::ReasonCode},
@@ -95,7 +94,7 @@ pub async fn mqtt_task(app: App, stack: Stack<'static>) {
 
     loop {
         if let Err(e) = run_session(&app, stack, endpoint).await {
-            println!("mqtt: session ended ({:?}), reconnecting in 5 s", e);
+            log::info!("mqtt: session ended ({:?}), reconnecting in 5 s", e);
         }
         MQTT_UP.store(false, core::sync::atomic::Ordering::Relaxed);
         Timer::after(Duration::from_secs(5)).await;
@@ -114,7 +113,7 @@ async fn run_session(
     let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
     socket.set_timeout(Some(Duration::from_secs(30)));
 
-    println!("mqtt: connecting to {}", MQTT_HOST);
+    log::info!("mqtt: connecting to {}", MQTT_HOST);
     socket
         .connect(endpoint)
         .await
@@ -145,7 +144,7 @@ async fn run_session(
 
     client.connect_to_broker().await?;
     MQTT_UP.store(true, core::sync::atomic::Ordering::Relaxed);
-    println!("mqtt: connected to broker");
+    log::info!("mqtt: connected to broker");
 
     // ----- on-connect: HA discovery + availability + subscribe ------
     let cfg = app.config();
@@ -176,7 +175,7 @@ async fn run_session(
     for key in ["sprinkler_1", "sprinkler_2", "water_control"] {
         client.subscribe_to_topic(&ctx.switch_command_topic(key)).await?;
     }
-    println!("mqtt: discovery published, subscribed to command topics");
+    log::info!("mqtt: discovery published, subscribed to command topics");
 
     // ----- serve loop: publish state every 5 s, route commands ------
     loop {
