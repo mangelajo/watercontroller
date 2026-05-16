@@ -23,6 +23,7 @@
 
 extern crate alloc;
 
+mod ap;
 mod logbuf;
 mod mdns;
 mod mqtt;
@@ -116,6 +117,61 @@ fn reset_reason_str() -> String {
     match esp_hal::system::reset_reason() {
         Some(r) => alloc::format!("{:?}", r),
         None => String::from("unknown"),
+    }
+}
+
+/// Which radio mode the firmware should bring up. Decided once at boot;
+/// switching between them is a reboot (the network stack binds to one
+/// interface for its lifetime).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BootMode {
+    /// Join a configured WiFi network (normal operation).
+    Sta,
+    /// Run the SoftAP setup portal (no network reachable / unconfigured).
+    Ap,
+}
+
+/// NVS key holding the persisted boot-mode hint (1 byte: 0 = STA, 1 = AP).
+const BOOT_MODE_KEY: &str = "wc.bootmode";
+
+/// Read the persisted boot-mode hint. Absent / unrecognised → STA, the
+/// safe default (after a power cycle you want to try real WiFi first).
+fn read_boot_mode(nvs: &dyn NvsStore) -> BootMode {
+    match nvs.get(BOOT_MODE_KEY).as_deref() {
+        Some([1, ..]) => BootMode::Ap,
+        _ => BootMode::Sta,
+    }
+}
+
+/// Persist the boot-mode hint — but only when it actually changes, so a
+/// steady device never writes flash. `connection_task` flips it to AP
+/// when WiFi is unreachable; `ap::scan_task` flips it back to STA when a
+/// known network returns. Each flip is followed by a reboot.
+fn write_boot_mode(nvs: &dyn NvsStore, mode: BootMode) {
+    if read_boot_mode(nvs) == mode {
+        return;
+    }
+    let byte: u8 = match mode {
+        BootMode::Sta => 0,
+        BootMode::Ap => 1,
+    };
+    if let Err(e) = nvs.set(BOOT_MODE_KEY, &[byte]) {
+        log::info!("bootmode: persist failed: {:?}", e);
+    }
+}
+
+/// Build the SoftAP radio config from the persisted WiFi settings.
+/// Open network when no AP password is set (matches the YAML default).
+fn build_ap_config(
+    wifi: &watercontroller_core::config::WifiConfig,
+) -> esp_radio::wifi::ap::AccessPointConfig {
+    use esp_radio::wifi::{ap::AccessPointConfig, AuthenticationMethod};
+    let ap = AccessPointConfig::default().with_ssid(wifi.ap_ssid.as_str());
+    if wifi.ap_password.is_empty() {
+        ap
+    } else {
+        ap.with_password(wifi.ap_password.clone())
+            .with_auth_method(AuthenticationMethod::Wpa2Personal)
     }
 }
 
@@ -438,40 +494,55 @@ async fn main(spawner: Spawner) -> ! {
     let state: &'static AppState =
         mk_static!(AppState, AppState { app: app.clone(), nvs, flash_kv });
 
-    let station_cfg = WifiConfig::Station(
-        StationConfig::default().with_ssid(SSID).with_password(PASSWORD.into()),
-    );
+    // Decide the radio mode for this boot: station to join a configured
+    // network, or the SoftAP setup portal when there's nothing to join
+    // or a prior STA failure persisted the hint. Switching modes is a
+    // reboot — the network stack binds one interface for its lifetime,
+    // and keeping only one alive avoids the second-stack RAM cost.
+    let cfg = app.config();
+    let boot_ap = cfg.wifi.networks.is_empty()
+        || read_boot_mode(&*state.nvs) == BootMode::Ap;
 
     let (controller, interfaces) = esp_radio::wifi::new(
         peripherals.WIFI,
-        ControllerConfig::default().with_initial_config(station_cfg),
+        ControllerConfig::default().with_initial_config(WifiConfig::Station(
+            StationConfig::default().with_ssid(SSID).with_password(PASSWORD.into()),
+        )),
     ).unwrap();
-    let wifi_iface = interfaces.station;
-    let net_cfg = embassy_net::Config::dhcpv4(Default::default());
 
     let rng = Rng::new();
     let seed = ((rng.random() as u64) << 32) | rng.random() as u64;
+    let resources = mk_static!(StackResources<16>, StackResources::<16>::new());
 
-    // Socket slots: 4 web + 1 mqtt + 1 mdns persistent, plus DHCP, DNS,
-    // and the transient SNTP / webhook sockets. 8 was exactly the
-    // steady-state count and overflowed the moment SNTP synced — 14
-    // leaves clear headroom.
-    let (stack, runner) = embassy_net::new(
-        wifi_iface,
-        net_cfg,
-        mk_static!(StackResources<16>, StackResources::<16>::new()),
-        seed,
-    );
+    let (stack, runner) = if boot_ap {
+        log::info!("wc-nostd: AP setup mode — SoftAP '{}'", cfg.wifi.ap_ssid);
+        let ap_net = embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4 {
+            address: embassy_net::Ipv4Cidr::new(
+                embassy_net::Ipv4Address::new(
+                    ap::AP_IP[0], ap::AP_IP[1], ap::AP_IP[2], ap::AP_IP[3],
+                ),
+                24,
+            ),
+            gateway: None,
+            dns_servers: Default::default(),
+        });
+        embassy_net::new(interfaces.access_point, ap_net, resources, seed)
+    } else {
+        log::info!("wc-nostd: station mode");
+        embassy_net::new(
+            interfaces.station,
+            embassy_net::Config::dhcpv4(Default::default()),
+            resources,
+            seed,
+        )
+    };
 
     let router = mk_static!(AppRouter<AppProps>, AppProps.build_app());
 
-    spawner.spawn(connection_task(controller, app.clone()).unwrap());
+    // Network-stack-agnostic tasks — identical in either mode.
     spawner.spawn(net_task(runner).unwrap());
     spawner.spawn(heartbeat(app.clone(), stack).unwrap());
     spawner.spawn(tick_task(app.clone(), valve_pins).unwrap());
-    spawner.spawn(mqtt::mqtt_task(app.clone(), stack).unwrap());
-    spawner.spawn(sntp::sntp_task(stack).unwrap());
-    spawner.spawn(webhook::webhook_task(app.clone(), stack).unwrap());
     spawner.spawn(ota::reboot_task().unwrap());
     spawner.spawn(
         sensors::sensor_task(app.clone(), analog, peripherals.PCNT, peripherals.GPIO33).unwrap(),
@@ -487,7 +558,24 @@ async fn main(spawner: Spawner) -> ! {
     );
     spawner.spawn(schedule::schedule_task(app.clone()).unwrap());
     spawner.spawn(telnet::telnet_task(stack).unwrap());
-    spawner.spawn(mdns::mdns_task(stack, app).unwrap());
+    spawner.spawn(mdns::mdns_task(stack, app.clone()).unwrap());
+
+    if boot_ap {
+        // SoftAP services: DHCP + captive DNS, plus a scanner that
+        // reboots into STA the moment a configured network reappears.
+        let ap_cfg = build_ap_config(&cfg.wifi);
+        spawner.spawn(ap::dhcp_server_task(stack).unwrap());
+        spawner.spawn(ap::dns_server_task(stack).unwrap());
+        spawner.spawn(
+            ap::scan_task(controller, app.clone(), state.nvs.clone(), ap_cfg).unwrap(),
+        );
+    } else {
+        // Station services: multi-SSID connect + the internet-facing tasks.
+        spawner.spawn(connection_task(controller, app.clone(), state.nvs.clone()).unwrap());
+        spawner.spawn(mqtt::mqtt_task(app.clone(), stack).unwrap());
+        spawner.spawn(sntp::sntp_task(stack).unwrap());
+        spawner.spawn(webhook::webhook_task(app.clone(), stack).unwrap());
+    }
     for id in 0..WEB_TASK_POOL_SIZE {
         spawner.spawn(web_task(id, stack, router, state).unwrap());
     }
@@ -500,17 +588,33 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 #[embassy_executor::task]
-async fn connection_task(mut controller: WifiController<'static>, app: App) {
+async fn connection_task(
+    mut controller: WifiController<'static>,
+    app: App,
+    nvs: Arc<dyn NvsStore>,
+) {
     use embassy_futures::select::{select3, Either3};
     log::info!("wifi: connection task started");
     // Round-robin over the configured networks: each failed attempt
     // advances to the next, so a dead/renamed AP doesn't wedge us.
     let mut idx = 0usize;
+    // Consecutive failed attempts. After ~3 full passes over every
+    // network with no success, persist an AP hint and reboot into the
+    // SoftAP setup portal — `ap::scan_task` reboots back to STA once a
+    // configured network is in range again.
+    let mut fails = 0u32;
     loop {
         let networks = app.config().wifi.networks.clone();
         if networks.is_empty() {
             log::warn!("wifi: no networks configured");
             Timer::after(Duration::from_secs(15)).await;
+            continue;
+        }
+        if fails >= networks.len() as u32 * 3 {
+            log::warn!("wifi: all networks unreachable — falling back to AP mode");
+            write_boot_mode(&*nvs, BootMode::Ap);
+            ota::request_reboot();
+            Timer::after(Duration::from_secs(10)).await;
             continue;
         }
         idx %= networks.len();
@@ -523,6 +627,7 @@ async fn connection_task(mut controller: WifiController<'static>, app: App) {
         if let Err(e) = controller.set_config(&sta) {
             log::info!("wifi: set_config '{}' failed: {:?}", net.ssid, e);
             idx += 1;
+            fails += 1;
             Timer::after(Duration::from_secs(3)).await;
             continue;
         }
@@ -535,6 +640,8 @@ async fn connection_task(mut controller: WifiController<'static>, app: App) {
         match controller.connect_async().await {
             Ok(info) => {
                 log::info!("wifi: connected: {:?}", info);
+                fails = 0;
+                write_boot_mode(&*nvs, BootMode::Sta);
                 {
                     let mut g = CONNECTED_SSID.lock().await;
                     g.clear();
@@ -584,6 +691,7 @@ async fn connection_task(mut controller: WifiController<'static>, app: App) {
             Err(e) => {
                 log::info!("wifi: connect to '{}' failed: {:?}", net.ssid, e);
                 idx += 1;
+                fails += 1;
             }
         }
         Timer::after(Duration::from_secs(5)).await;

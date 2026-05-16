@@ -31,7 +31,7 @@ fn handle(app: &App, nvs: &dyn NvsStore, line: &str) {
     match cmd {
         "help" => {
             log::info!(
-                "serial: commands — help | status | diag | reset | config reset | alarm clear"
+                "serial: commands — help | status | diag | reset | config reset | ap | alarm clear"
             );
         }
         "status" => {
@@ -80,6 +80,14 @@ fn handle(app: &App, nvs: &dyn NvsStore, line: &str) {
                 Ok(()) => log::info!("serial: config erased — run 'reset' to boot defaults"),
                 Err(e) => log::info!("serial: config reset failed: {:?}", e),
             }
+        }
+        "ap" => {
+            // Force the SoftAP setup portal: persist the AP boot hint
+            // and reboot. AP mode reboots itself back to STA once a
+            // configured network is in range again.
+            crate::write_boot_mode(nvs, crate::BootMode::Ap);
+            log::info!("serial: AP setup mode set — rebooting");
+            crate::ota::request_reboot();
         }
         "alarm clear" => {
             app.clear_flow_alarm();
