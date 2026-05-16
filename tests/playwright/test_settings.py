@@ -185,3 +185,21 @@ def test_advanced_json_editor_invalid_json_inline_error(page: Page, host_url: st
     page.locator("#cfg-json").fill("{ this is not json }")
     page.locator("#cfg-save").click()
     expect(page.locator("#cfg-msg")).to_have_text(re.compile(r"invalid JSON"), timeout=1_000)
+
+
+def test_advanced_diagnostics_auto_refresh_populates(page: Page, host_url: str):
+    """The Advanced tab's "Diagnostics (auto-refresh)" panel must fill
+    from /api/diag.
+
+    Regression: refreshDiag() formatted every heap field unconditionally;
+    a field this firmware doesn't report (largest_free_block, the tasks
+    array) made .toLocaleString() throw, aborting the whole refresh and
+    leaving the panel on its "—" placeholders.
+    """
+    _open_tab(page, host_url, "advanced")
+    # diag polling starts on tab entry — the heap-free field must leave
+    # its "—" placeholder and show a byte count.
+    expect(page.locator("#diag-free")).not_to_have_text("—", timeout=8_000)
+    expect(page.locator("#diag-free")).to_contain_text("B")
+    # min-ever-free is firmware-provided too and must populate.
+    expect(page.locator("#diag-min")).to_contain_text("B", timeout=8_000)

@@ -33,12 +33,25 @@ const NOT_FOUND: &str = r#"{"error":"unknown endpoint"}"#;
 
 pub fn api_get(seg: &str, st: &AppState, all: bool) -> String {
     match seg {
-        "diag" => alloc::format!(
-            r#"{{"uptime_s":{},"heap":{{"total_free_bytes":{},"total_used_bytes":{}}},"fw":"wc-nostd"}}"#,
-            crate::uptime_secs(),
-            esp_alloc::HEAP.free(),
-            esp_alloc::HEAP.used(),
-        ),
+        "diag" => {
+            // `min_ever_free_bytes` is the heartbeat's running minimum
+            // (`diagnostics.min_free_heap_bytes`); allocated == used.
+            // The SPA's Advanced-tab diagnostics panel reads these.
+            let min_free = st
+                .app
+                .snapshot()
+                .diagnostics
+                .min_free_heap_bytes
+                .unwrap_or(0);
+            alloc::format!(
+                r#"{{"uptime_s":{},"heap":{{"total_free_bytes":{},"total_used_bytes":{},"total_allocated_bytes":{},"min_ever_free_bytes":{}}},"fw":"wc-nostd"}}"#,
+                crate::uptime_secs(),
+                esp_alloc::HEAP.free(),
+                esp_alloc::HEAP.used(),
+                esp_alloc::HEAP.used(),
+                min_free,
+            )
+        }
         // The SPA reads the snapshot / config fields directly, so both
         // are returned bare — not wrapped — matching the IDF firmware.
         "status" => serde_json::to_string(&st.app.snapshot()).unwrap_or_default(),

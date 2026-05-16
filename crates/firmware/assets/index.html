@@ -1031,30 +1031,39 @@
       const r = await fetch("/api/diag");
       if (!r.ok) return;
       const d = await r.json();
-      const fmt = n => n.toLocaleString();
-      $("#diag-free").textContent    = fmt(d.heap.total_free_bytes) + " B";
-      $("#diag-largest").textContent = fmt(d.heap.largest_free_block) + " B";
-      $("#diag-min").textContent     = fmt(d.heap.min_ever_free_bytes) + " B";
-      $("#diag-alloc").textContent   = fmt(d.heap.total_allocated_bytes) + " B";
-      if (d.heap.internal_free_bytes !== undefined) {
-        $("#diag-internal-free").textContent = fmt(d.heap.internal_free_bytes) + " B";
-        $("#diag-internal-largest").textContent = fmt(d.heap.internal_largest_free) + " B";
-        $("#diag-internal-min").textContent = fmt(d.heap.internal_min_ever_free) + " B";
-        $("#diag-psram").textContent = fmt(d.heap.psram_free_bytes) + " B / "
-          + fmt(d.heap.psram_largest_free) + " B largest";
+      const heap = d.heap || {};
+      // Tolerate a partial /api/diag payload: a field this firmware
+      // doesn't report just keeps its "—" placeholder. (Calling
+      // .toLocaleString() on an absent field used to throw and leave
+      // the whole panel blank.)
+      const fmtB = (n) => (typeof n === "number" ? n.toLocaleString() + " B" : "—");
+      $("#diag-free").textContent    = fmtB(heap.total_free_bytes);
+      $("#diag-largest").textContent = fmtB(heap.largest_free_block);
+      $("#diag-min").textContent     = fmtB(heap.min_ever_free_bytes);
+      $("#diag-alloc").textContent   = fmtB(heap.total_allocated_bytes);
+      if (heap.internal_free_bytes !== undefined) {
+        $("#diag-internal-free").textContent = fmtB(heap.internal_free_bytes);
+        $("#diag-internal-largest").textContent = fmtB(heap.internal_largest_free);
+        $("#diag-internal-min").textContent = fmtB(heap.internal_min_ever_free);
+        $("#diag-psram").textContent = fmtB(heap.psram_free_bytes) + " / "
+          + fmtB(heap.psram_largest_free) + " largest";
       }
       const tbody = $("#diag-tasks-table tbody");
-      // Sort by stack_min_free ascending so the riskiest tasks float to the top.
-      const tasks = [...d.tasks].sort((a, b) => a.stack_min_free_bytes - b.stack_min_free_bytes);
-      tbody.innerHTML = "";
-      for (const t of tasks) {
-        const tr = document.createElement("tr");
-        // <512 B free is "bad" (one mbedTLS chain push could overflow);
-        // <1024 B is "warn"; otherwise OK.
-        if (t.stack_min_free_bytes < 512) tr.className = "bad";
-        else if (t.stack_min_free_bytes < 1024) tr.className = "warn";
-        tr.innerHTML = `<td>${t.name}</td><td>${t.state}</td><td>${t.priority}</td><td>${fmt(t.stack_min_free_bytes)}</td>`;
-        tbody.appendChild(tr);
+      if (tbody) {
+        tbody.innerHTML = "";
+        // FreeRTOS task stacks — only the IDF firmware reports these;
+        // the embassy build has no task table, so the list stays empty.
+        const tasks = Array.isArray(d.tasks) ? [...d.tasks] : [];
+        // Sort by stack_min_free ascending so the riskiest float to the top.
+        tasks.sort((a, b) => a.stack_min_free_bytes - b.stack_min_free_bytes);
+        for (const t of tasks) {
+          const tr = document.createElement("tr");
+          // <512 B free is "bad"; <1024 B is "warn"; otherwise OK.
+          if (t.stack_min_free_bytes < 512) tr.className = "bad";
+          else if (t.stack_min_free_bytes < 1024) tr.className = "warn";
+          tr.innerHTML = `<td>${t.name}</td><td>${t.state}</td><td>${t.priority}</td><td>${t.stack_min_free_bytes.toLocaleString()}</td>`;
+          tbody.appendChild(tr);
+        }
       }
     } catch (e) {
       // Silent — Advanced tab will just show stale numbers if a request times out.
