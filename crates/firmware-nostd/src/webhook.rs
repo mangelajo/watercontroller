@@ -24,6 +24,10 @@ use embassy_sync::{
 };
 use embassy_time::{Duration, Timer};
 use embedded_io_async::Write as _;
+#[cfg(feature = "tls")]
+use embassy_sync::mutex::Mutex;
+#[cfg(feature = "tls")]
+use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
 use watercontroller_core::{
     app::App,
     webhook::{render_template, WebhookConfig, WebhookDispatcher, WebhookEvent},
@@ -167,8 +171,11 @@ async fn deliver(
 ) -> Result<u16, &'static str> {
     let url = parse_url(&wh.url).ok_or("bad url")?;
     if url.https {
-        // Outbound TLS isn't compiled into this build. Skipping is
-        // better than a confusing connection error on :443.
+        #[cfg(feature = "tls")]
+        return deliver_https(stack, wh, &url, body).await;
+        // Without the `tls` feature, outbound TLS isn't compiled in —
+        // skipping is clearer than a bare connection error on :443.
+        #[cfg(not(feature = "tls"))]
         return Err("https requires the `tls` feature");
     }
 
@@ -191,6 +198,106 @@ async fn deliver(
     socket.flush().await.map_err(|_| "flush")?;
 
     read_status(&mut socket).await
+}
+
+// ---- HTTPS (outbound TLS 1.3 client) ---------------------------------
+//
+// `embedded-tls` — pure Rust, no C. The record buffers are a single
+// static guarded by `TLS_BUFS`, so only one webhook TLS session is ever
+// live and the ~18 KiB of buffers sit in `.bss`, never the heap: a
+// handshake allocates almost nothing and can't fragment the heap.
+
+/// The ESP32 hardware RNG wrapped to satisfy `rand_core` 0.6 (the
+/// version embedded-tls 0.18 expects) for the TLS handshake.
+#[cfg(feature = "tls")]
+struct EspRng(esp_hal::rng::Rng);
+
+#[cfg(feature = "tls")]
+impl rand_core::RngCore for EspRng {
+    fn next_u32(&mut self) -> u32 {
+        self.0.random()
+    }
+    fn next_u64(&mut self) -> u64 {
+        (u64::from(self.0.random()) << 32) | u64::from(self.0.random())
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        for chunk in dest.chunks_mut(4) {
+            let word = self.0.random().to_ne_bytes();
+            chunk.copy_from_slice(&word[..chunk.len()]);
+        }
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+#[cfg(feature = "tls")]
+impl rand_core::CryptoRng for EspRng {}
+
+/// TLS record buffers. `read` must hold one whole encrypted record — a
+/// server's Certificate handshake record can approach the 16 640-byte
+/// TLS maximum, and embedded-tls can't skip bytes it can't buffer.
+/// `write` only carries our own (small) request records.
+#[cfg(feature = "tls")]
+struct TlsBufs {
+    read: [u8; 16640],
+    write: [u8; 2048],
+}
+
+/// One static set of TLS buffers; the `Mutex` doubles as the
+/// single-flight guard — one webhook TLS handshake at a time.
+#[cfg(feature = "tls")]
+static TLS_BUFS: Mutex<CriticalSectionRawMutex, TlsBufs> =
+    Mutex::new(TlsBufs { read: [0; 16640], write: [0; 2048] });
+
+/// Deliver an `https://` webhook over TLS 1.3.
+#[cfg(feature = "tls")]
+async fn deliver_https(
+    stack: Stack<'static>,
+    wh: &WebhookConfig,
+    url: &Url<'_>,
+    body: &str,
+) -> Result<u16, &'static str> {
+    let ip = resolve(stack, url.host).await.ok_or("dns")?;
+
+    let mut rx = [0u8; 1024];
+    let mut tx = [0u8; 1024];
+    let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
+    // The handshake runs ECDHE/ECDSA in software on the Xtensa core —
+    // seconds, not milliseconds — so allow well beyond the HTTP 8 s.
+    socket.set_timeout(Some(Duration::from_secs(20)));
+    socket
+        .connect(IpEndpoint::new(ip, url.port))
+        .await
+        .map_err(|_| "connect")?;
+
+    let mut bufs = TLS_BUFS.lock().await;
+    let TlsBufs { read, write } = &mut *bufs;
+    let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(socket, read, write);
+
+    let config = TlsConfig::new().with_server_name(url.host);
+    // PROTOTYPE: `UnsecureProvider` performs NO certificate verification.
+    // Fine for measuring handshake RAM/stability; must be replaced with
+    // a verifying provider before this is production-trusted.
+    tls.open(TlsContext::new(
+        &config,
+        UnsecureProvider::new::<Aes128GcmSha256>(EspRng(esp_hal::rng::Rng::new())),
+    ))
+    .await
+    .map_err(|e| {
+        log::warn!("webhook: tls handshake failed: {e:?}");
+        "tls handshake"
+    })?;
+
+    let request = build_request(wh, url, body);
+    tls.write_all(request.as_bytes())
+        .await
+        .map_err(|_| "tls write")?;
+    tls.flush().await.map_err(|_| "tls flush")?;
+
+    let status = read_status(&mut tls).await;
+    let _ = tls.close().await;
+    status
 }
 
 /// Build a complete HTTP/1.1 request. `Content-Type` defaults to JSON
@@ -234,10 +341,10 @@ fn build_request(wh: &WebhookConfig, url: &Url<'_>, body: &str) -> String {
 
 /// Read just enough of the response to parse the status line
 /// (`HTTP/1.1 NNN ...`). The body is ignored — we only report 2xx/non.
-async fn read_status(socket: &mut TcpSocket<'_>) -> Result<u16, &'static str> {
+async fn read_status<R: embedded_io_async::Read>(r: &mut R) -> Result<u16, &'static str> {
     let mut buf = [0u8; 64];
     let recv = embassy_futures::select::select(
-        socket.read(&mut buf),
+        r.read(&mut buf),
         Timer::after(Duration::from_secs(8)),
     )
     .await;

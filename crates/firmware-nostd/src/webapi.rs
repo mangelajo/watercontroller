@@ -16,8 +16,9 @@
 //! in-band as `{"error":"..."}` with a 200, matching the SPA's
 //! `response.ok` checks.
 
-use alloc::string::String;
+use alloc::{boxed::Box, string::String, sync::Arc};
 
+use serde::{Serialize, Serializer};
 use serde_json::Value;
 use watercontroller_core::{
     api::SwitchCommand,
@@ -29,54 +30,164 @@ use crate::AppState;
 
 const NOT_FOUND: &str = r#"{"error":"unknown endpoint"}"#;
 
+// ---- streaming JSON views --------------------------------------------
+//
+// picoserve's `Json<T>` serializes `T` chunk-by-chunk through a small
+// fixed buffer (measure pass + write passes), so the response is never
+// held whole in RAM. `JsonView` is the `Serialize` payload behind
+// `ApiResp::Stream`: it lets one handler return either the full config,
+// the redacted config, or a single redacted section — all streamed.
+
+/// A top-level `Config` section, identified by its serde field name.
+#[derive(Clone, Copy)]
+pub enum Section {
+    Wifi,
+    Mqtt,
+    Https,
+    Switches,
+    Sensors,
+    FlowAlarm,
+    Timezone,
+    SntpServers,
+    Schedule,
+    Wireguard,
+    AdminToken,
+    Webhooks,
+}
+
+impl Section {
+    /// Map a `/api/config/<name>` path segment to a section, or `None`
+    /// if it isn't a known config section.
+    pub fn parse(name: &str) -> Option<Section> {
+        Some(match name {
+            "wifi" => Section::Wifi,
+            "mqtt" => Section::Mqtt,
+            "https" => Section::Https,
+            "switches" => Section::Switches,
+            "sensors" => Section::Sensors,
+            "flow_alarm" => Section::FlowAlarm,
+            "timezone" => Section::Timezone,
+            "sntp_servers" => Section::SntpServers,
+            "schedule" => Section::Schedule,
+            "wireguard" => Section::Wireguard,
+            "admin_token" => Section::AdminToken,
+            "webhooks" => Section::Webhooks,
+            _ => return None,
+        })
+    }
+}
+
+/// A JSON body streamed by picoserve — no whole-`Config` string is ever
+/// buffered.
+///
+/// The owned variants box their `Config`: a bare `Config` is several KiB,
+/// and `JsonView` rides inside the handler future of every `web_task` in
+/// the static pool — embedding it by value bloats `.bss` past the
+/// startup-stack cliff (`stack pointer out of range` at boot).
+pub enum JsonView {
+    /// Full config including secrets — the `?all=1` backup download.
+    FullConfig(Arc<Config>),
+    /// The secret-redacted full config.
+    RedactedConfig(Box<Config>),
+    /// One section of the secret-redacted config. The `Config` is the
+    /// redacted clone; only the named field is serialized out of it.
+    Section(Box<Config>, Section),
+}
+
+impl Serialize for JsonView {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            // `&Arc<Config>` → `&Config`; serde's `Arc` impl is behind
+            // the `rc` feature, which this build doesn't enable.
+            JsonView::FullConfig(c) => (**c).serialize(s),
+            JsonView::RedactedConfig(c) => c.serialize(s),
+            JsonView::Section(c, sec) => match sec {
+                Section::Wifi => c.wifi.serialize(s),
+                Section::Mqtt => c.mqtt.serialize(s),
+                Section::Https => c.https.serialize(s),
+                Section::Switches => c.switches.serialize(s),
+                Section::Sensors => c.sensors.serialize(s),
+                Section::FlowAlarm => c.flow_alarm.serialize(s),
+                Section::Timezone => c.timezone.serialize(s),
+                Section::SntpServers => c.sntp_servers.serialize(s),
+                Section::Schedule => c.schedule.serialize(s),
+                Section::Wireguard => c.wireguard.serialize(s),
+                Section::AdminToken => c.admin_token.serialize(s),
+                Section::Webhooks => c.webhooks.serialize(s),
+            },
+        }
+    }
+}
+
 // ---- /api/<seg> ------------------------------------------------------
 
-pub fn api_get(seg: &str, st: &AppState, all: bool) -> String {
+pub fn api_get(seg: &str, st: &AppState, all: bool) -> crate::ApiResp {
     match seg {
         "diag" => {
             // `min_ever_free_bytes` is the heartbeat's running minimum
             // (`diagnostics.min_free_heap_bytes`); allocated == used.
-            // The SPA's Advanced-tab diagnostics panel reads these.
-            let min_free = st
-                .app
-                .snapshot()
-                .diagnostics
-                .min_free_heap_bytes
-                .unwrap_or(0);
-            alloc::format!(
-                r#"{{"uptime_s":{},"heap":{{"total_free_bytes":{},"total_used_bytes":{},"total_allocated_bytes":{},"min_ever_free_bytes":{}}},"fw":"wc-nostd"}}"#,
+            // `capacity_bytes` is the fixed pre-reserved heap (free+used)
+            // — a no_std build has no growable heap. The SPA's Advanced-
+            // tab diagnostics panel reads these. Small + bounded, so it's
+            // a plain buffered body, not streamed.
+            let snap = st.app.snapshot();
+            let min_free = snap.diagnostics.min_free_heap_bytes.unwrap_or(0);
+            let reset = snap.diagnostics.reset_reason.as_deref().unwrap_or("unknown");
+            let free = esp_alloc::HEAP.free();
+            let used = esp_alloc::HEAP.used();
+            crate::ApiResp::Json(alloc::format!(
+                r#"{{"uptime_s":{},"heap":{{"total_free_bytes":{},"total_used_bytes":{},"total_allocated_bytes":{},"capacity_bytes":{},"min_ever_free_bytes":{}}},"reset_reason":"{}","fw":"wc-nostd"}}"#,
                 crate::uptime_secs(),
-                esp_alloc::HEAP.free(),
-                esp_alloc::HEAP.used(),
-                esp_alloc::HEAP.used(),
+                free,
+                used,
+                used,
+                free + used,
                 min_free,
-            )
+                reset,
+            ))
         }
-        // The SPA reads the snapshot / config fields directly, so both
-        // are returned bare — not wrapped — matching the IDF firmware.
-        "status" => serde_json::to_string(&st.app.snapshot()).unwrap_or_default(),
+        // Snapshot is small + bounded — buffered. The SPA reads its
+        // fields directly (returned bare, not wrapped).
+        "status" => {
+            crate::ApiResp::Json(serde_json::to_string(&st.app.snapshot()).unwrap_or_default())
+        }
+        // The config can be large (many schedule rules / webhooks);
+        // streamed so it's never held whole in RAM.
         "config" => {
             let cfg = st.app.config();
             if all {
                 // `?all` — full config incl. secrets, for the SPA's
-                // backup download.
-                serde_json::to_string(&*cfg).unwrap_or_default()
+                // backup download. The Arc is borrowed, not cloned.
+                crate::ApiResp::Stream(JsonView::FullConfig(cfg))
             } else {
-                serde_json::to_string(&cfg.redact_secrets_for_api()).unwrap_or_default()
+                crate::ApiResp::Stream(JsonView::RedactedConfig(Box::new(
+                    cfg.redact_secrets_for_api(),
+                )))
             }
         }
-        _ => String::from(NOT_FOUND),
+        _ => crate::ApiResp::Json(String::from(NOT_FOUND)),
     }
 }
 
+// `#[inline(never)]`: this builds a whole `Config` on the stack. Keeping
+// it out of the route-dispatch frame stops that transient from counting
+// against the streaming-response serializer that runs on the same task.
+#[inline(never)]
 pub fn api_put(seg: &str, st: &AppState, body: &[u8]) -> String {
     match seg {
         "config" => match serde_json::from_slice::<Config>(body) {
-            Ok(cfg) => {
-                if let Err(e) = cfg.save(&*st.nvs) {
+            Ok(mut incoming) => {
+                // Preserve stored secrets the client sent back blank: a
+                // redacted GET /api/config returns WiFi passwords, the
+                // admin token and TLS keys empty, so a plain round-trip
+                // PUT would otherwise wipe them from NVS. Restore in
+                // place against the borrowed live config — cloning the
+                // whole Config here would blow the web-task stack.
+                incoming.restore_secrets_from(&st.app.config());
+                if let Err(e) = incoming.save(&*st.nvs) {
                     return alloc::format!(r#"{{"error":"nvs save failed: {:?}"}}"#, e);
                 }
-                st.app.replace_config(cfg);
+                st.app.replace_config(incoming);
                 String::from(r#"{"result":"ok"}"#)
             }
             Err(e) => alloc::format!(r#"{{"error":"bad config json: {}"}}"#, e),
@@ -158,18 +269,24 @@ pub fn webhooks_post(action: &str, st: &AppState, body: &[u8]) -> String {
 
 // ---- /api/config/<section> ------------------------------------------
 
-/// One config section, sliced out of the redacted config.
-pub fn config_section_get(section: &str, st: &AppState) -> String {
-    let cfg = st.app.config();
-    let safe = cfg.redact_secrets_for_api();
-    let full = serde_json::to_value(&safe).unwrap_or(Value::Null);
-    match full.get(section) {
-        Some(v) => serde_json::to_string(v).unwrap_or_else(|_| String::from("null")),
-        None => String::from(r#"{"error":"unknown config section"}"#),
+/// One config section, streamed straight out of the redacted config —
+/// only that section is serialized, not the whole `Config`.
+pub fn config_section_get(section: &str, st: &AppState) -> crate::ApiResp {
+    match Section::parse(section) {
+        Some(sec) => {
+            let redacted = Box::new(st.app.config().redact_secrets_for_api());
+            crate::ApiResp::Stream(JsonView::Section(redacted, sec))
+        }
+        None => crate::ApiResp::Json(String::from(r#"{"error":"unknown config section"}"#)),
     }
 }
 
 /// Merge an incoming section body into the live config + persist.
+//
+// `#[inline(never)]`: materializes the config as a `Value` tree plus a
+// full `Config` — kept off the route-dispatch frame for the same reason
+// as `api_put`.
+#[inline(never)]
 pub fn config_section_put(section: &str, st: &AppState, body: &[u8]) -> String {
     let incoming: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
@@ -185,10 +302,14 @@ pub fn config_section_put(section: &str, st: &AppState, body: &[u8]) -> String {
         Some(target) => merge(target, &incoming),
         None => return String::from(r#"{"error":"unknown config section"}"#),
     }
-    let cfg: Config = match serde_json::from_value(full) {
+    let mut cfg: Config = match serde_json::from_value(full) {
         Ok(c) => c,
         Err(e) => return alloc::format!(r#"{{"error":"invalid config: {}"}}"#, e),
     };
+    // The Value merge above replaces arrays wholesale, so a redacted
+    // `wifi.networks[]` section arrives with blank passwords. Restore
+    // the stored secrets (ssid-matched) in place before persisting.
+    cfg.restore_secrets_from(&st.app.config());
     if let Err(e) = cfg.save(&*st.nvs) {
         return alloc::format!(r#"{{"error":"nvs save failed: {:?}"}}"#, e);
     }

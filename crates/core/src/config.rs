@@ -370,37 +370,45 @@ impl Config {
     ///     wireguard keys, admin token): empty in incoming → keep stored;
     ///     non-empty in incoming → overwrite.
     pub fn merge_preserving_secrets(&mut self, mut incoming: Self) {
-        for net in incoming.wifi.networks.iter_mut() {
+        incoming.restore_secrets_from(self);
+        *self = incoming;
+    }
+
+    /// In-place form of [`Self::merge_preserving_secrets`]: fill any secret
+    /// field left blank on `self` (a freshly deserialized incoming API
+    /// update) from `stored`, which is borrowed rather than consumed.
+    ///
+    /// This is the variant a firmware handler should use — it keeps only
+    /// the single incoming `Config` on the (tight) task stack instead of
+    /// cloning the whole live `Config` to get an owned `self`.
+    pub fn restore_secrets_from(&mut self, stored: &Self) {
+        for net in self.wifi.networks.iter_mut() {
             if net.password.is_empty() {
-                if let Some(existing) = self
-                    .wifi
-                    .networks
-                    .iter()
-                    .find(|n| n.ssid == net.ssid)
+                if let Some(existing) =
+                    stored.wifi.networks.iter().find(|n| n.ssid == net.ssid)
                 {
                     net.password = existing.password.clone();
                 }
             }
         }
-        if incoming.mqtt.password.is_empty() {
-            incoming.mqtt.password = self.mqtt.password.clone();
+        if self.mqtt.password.is_empty() {
+            self.mqtt.password = stored.mqtt.password.clone();
         }
-        if incoming.mqtt.client_key_pem.is_empty() {
-            incoming.mqtt.client_key_pem = self.mqtt.client_key_pem.clone();
+        if self.mqtt.client_key_pem.is_empty() {
+            self.mqtt.client_key_pem = stored.mqtt.client_key_pem.clone();
         }
-        if incoming.https.key_pem.is_empty() {
-            incoming.https.key_pem = self.https.key_pem.clone();
+        if self.https.key_pem.is_empty() {
+            self.https.key_pem = stored.https.key_pem.clone();
         }
-        if incoming.wireguard.private_key.is_empty() {
-            incoming.wireguard.private_key = self.wireguard.private_key.clone();
+        if self.wireguard.private_key.is_empty() {
+            self.wireguard.private_key = stored.wireguard.private_key.clone();
         }
-        if incoming.wireguard.peer_preshared_key.is_empty() {
-            incoming.wireguard.peer_preshared_key = self.wireguard.peer_preshared_key.clone();
+        if self.wireguard.peer_preshared_key.is_empty() {
+            self.wireguard.peer_preshared_key = stored.wireguard.peer_preshared_key.clone();
         }
-        if incoming.admin_token.is_empty() {
-            incoming.admin_token = self.admin_token.clone();
+        if self.admin_token.is_empty() {
+            self.admin_token = stored.admin_token.clone();
         }
-        *self = incoming;
     }
 }
 

@@ -151,6 +151,12 @@ qemu-stop: ## kill any running qemu-system-xtensa instance
 ui-tests: $(PW_SENTINEL) ## Playwright tests in headless chromium against the host build
 	$(PW_VENV)/bin/pytest tests/playwright -v
 
+.PHONY: longevity-test
+longevity-test: $(PW_SENTINEL) ## non-destructive read+write tests vs a live device (no reboot/reset). Usage: make longevity-test IP=<addr>
+	@if [ -z "$(IP)" ]; then echo "Usage: make longevity-test IP=<device-ip>"; exit 1; fi
+	@WC_TEST_TARGET_URL=http://$(IP) WC_NO_CONFIG_RESET=1 \
+	    $(PW_VENV)/bin/pytest tests/playwright -m longevity -q
+
 # -- OTA over the network -------------------------------------------------
 # Iterating on a flashed device: 0.5 s upload + ~3 s reboot, vs. ~10 s for
 # the full serial flash + boot cycle.

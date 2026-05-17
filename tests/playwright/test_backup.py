@@ -18,11 +18,19 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from playwright.sync_api import Page, expect
+
+# Note: only the read + clean-round-trip tests below are marked
+# `longevity`. `test_all_query_returns_full_secrets` appends a junk
+# WiFi network each run, and the UI download/upload tests replace the
+# whole config — both rely on the teardown reset, so they're left out
+# of the no-reset longevity loop.
 
 
 # ---------- API ---------------------------------------------------------
 
+@pytest.mark.longevity
 def test_default_get_redacts_secrets(host_url, api_request_context):
     """`GET /api/config` (no query) must hide credentials so that a SPA
     poll doesn't leak the admin token, WiFi passwords, or TLS keys to
@@ -67,6 +75,7 @@ def test_all_query_returns_full_secrets(host_url, api_request_context):
     assert red["admin_token"] == ""
 
 
+@pytest.mark.longevity
 def test_put_full_config_roundtrips(host_url, api_request_context):
     """A backup file downloaded via `?all` should restore cleanly via
     PUT /api/config — values unchanged on the other side."""
@@ -81,6 +90,47 @@ def test_put_full_config_roundtrips(host_url, api_request_context):
     assert r.ok, r.status
     full_after = (api_request_context.get(f"{host_url}/api/config?all=1")).json()
     assert full_after["timezone"] == "Europe/London"
+
+
+@pytest.mark.longevity
+def test_redacted_roundtrip_preserves_secrets(host_url, api_request_context):
+    """Regression guard: a plain `GET /api/config` → `PUT /api/config`
+    round-trip must NOT wipe stored secrets.
+
+    `GET /api/config` redacts WiFi passwords, the admin token and TLS
+    keys to "". The firmware merges those blank fields back against NVS
+    (`Config::merge_preserving_secrets`) so the round-trip is lossless.
+    Before that fix the longevity loop itself slowly erased the device's
+    WiFi credentials and knocked it into AP-mode fallback."""
+    # Seed a secret that doesn't affect connectivity, so the final
+    # assertion is meaningful even on a fresh host build with no secrets.
+    seed = api_request_context.get(f"{host_url}/api/config?all=1").json()
+    seed.setdefault("mqtt", {})["password"] = "mqtt-preserve-test"
+    assert api_request_context.put(
+        f"{host_url}/api/config",
+        data=json.dumps(seed),
+        headers={"Content-Type": "application/json"},
+    ).ok
+
+    before = api_request_context.get(f"{host_url}/api/config?all=1").json()
+    assert before["mqtt"]["password"] == "mqtt-preserve-test"
+
+    # GET the redacted view; confirm secrets really are blanked on the way out.
+    redacted = api_request_context.get(f"{host_url}/api/config").json()
+    assert redacted["mqtt"]["password"] == ""
+    for n in redacted.get("wifi", {}).get("networks", []):
+        assert n.get("password", "") == ""
+
+    # PUT the redacted payload straight back, unchanged.
+    assert api_request_context.put(
+        f"{host_url}/api/config",
+        data=json.dumps(redacted),
+        headers={"Content-Type": "application/json"},
+    ).ok
+
+    # The full config must be byte-identical afterwards — every secret survived.
+    after = api_request_context.get(f"{host_url}/api/config?all=1").json()
+    assert after == before
 
 
 # ---------- UI ----------------------------------------------------------

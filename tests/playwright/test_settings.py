@@ -14,6 +14,12 @@ import re
 import pytest
 from playwright.sync_api import Page, expect
 
+# Every test here renders a section form or round-trips a config
+# section — no WiFi disruption, no reboot — so the whole module is
+# longevity-safe. `test_wifi_save_round_trip` carries its own
+# `skipif` for real hardware, so the loop selects but skips it.
+pytestmark = pytest.mark.longevity
+
 
 def _open_tab(page: Page, host_url: str, tab: str) -> None:
     """Navigate to host_url and click the named tab.

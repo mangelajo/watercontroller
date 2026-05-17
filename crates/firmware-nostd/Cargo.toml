@@ -22,7 +22,7 @@ esp-rtos             = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833
 esp-radio            = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442", features = ["esp32", "wifi", "log-04"] }
 esp-alloc            = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442" }
 esp-bootloader-esp-idf = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442", features = ["esp32"] }
-esp-backtrace        = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442", features = ["esp32", "println", "panic-handler"] }
+esp-backtrace        = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442", features = ["esp32", "println", "panic-handler", "custom-halt"] }
 esp-println          = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442", features = ["esp32", "log-04"] }
 esp-storage          = { git = "https://github.com/esp-rs/esp-hal", rev = "a4833adfc15b6a0bd5b08c525dd244066b57a442", features = ["esp32"] }
 sequential-storage   = "7"
@@ -83,12 +83,26 @@ portable-atomic      = { version = "1", features = ["critical-section"] }
 static_cell          = "2"
 spin                 = { version = "0.10", default-features = false, features = ["mutex", "spin_mutex"] }
 embedded-storage     = "0.3"
+# `alloc`: `TlsConfig::new()` only advertises RSA `signature_algorithms`
+# when embedded-tls's `alloc` feature is on. Without it the ClientHello
+# offers ECDSA/Ed25519 only and any host with an RSA cert (e.g. a Let's
+# Encrypt `R`-series chain) aborts the handshake. `alloc` is a bare marker
+# feature — no extra deps. The heavier `rsa` feature (which also *verifies*
+# an RSA CertificateVerify) is not used: it pulls a second `der` version
+# that conflicts with the RustCrypto stack, and `UnsecureProvider` skips
+# verification anyway (a verifying provider is still a TODO — see webhook.rs).
+embedded-tls = { version = "0.18", default-features = false, features = ["log", "alloc"], optional = true }
+# rand_core 0.6 — the version embedded-tls 0.18 wants; we impl its
+# RngCore/CryptoRng over the ESP32 hardware RNG for the TLS handshake.
+rand_core = { version = "0.6", default-features = false, optional = true }
 
 [features]
 default = []
-# Outbound (client) TLS for webhook delivery. Off by default — keeps
-# HTTP-only builds fast (no mbedtls C compile).
-tls = ["dep:mbedtls-rs"]
+# Outbound (client) TLS for webhook delivery. Off by default. Uses the
+# pure-Rust `embedded-tls` (TLS 1.3) — caller-sized record buffers, no C
+# compile. (`mbedtls-rs` was evaluated and dropped: its 16 KiB×2 fixed
+# SSL buffers don't fit this device's heap.)
+tls = ["dep:embedded-tls", "dep:rand_core"]
 
 # mbedtls-rs-sys depends on `esp-hal = "1"` from crates.io, but we use a
 # git pin (matching set of esp-radio/esp-rtos/etc). Without this patch,

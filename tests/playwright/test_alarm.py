@@ -8,7 +8,12 @@ make sure the HTTP + SPA wiring round-trips correctly.
 
 from __future__ import annotations
 
+import pytest
 from playwright.sync_api import APIRequestContext, expect
+
+# Config round-trip + alarm-clear — no WiFi disruption, no reboot — so
+# the whole module is safe for the longevity loop.
+pytestmark = pytest.mark.longevity
 
 
 def test_flow_alarm_config_round_trip(host_url: str, api_request_context: APIRequestContext):

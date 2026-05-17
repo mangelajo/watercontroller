@@ -774,8 +774,14 @@
           <code>/api/diag</code>. Refreshes every 10 seconds while this tab is open.
           Useful for spotting memory pressure (low <em>min ever free</em>) or tasks
           dangerously close to overflowing their stack (low <em>stack free</em>).</p>
+        <div class="grid2">
+          <div class="field"><label>Uptime</label><span class="diag-val" id="diag-uptime">—</span></div>
+          <div class="field"><label>Last reset reason</label><span class="diag-val" id="diag-reset">—</span></div>
+        </div>
         <div class="grid2" id="diag-heap">
           <div class="field"><label>Heap free (total)</label><span class="diag-val" id="diag-free">—</span></div>
+          <div class="field"><label>Heap used</label><span class="diag-val" id="diag-used">—</span></div>
+          <div class="field"><label>Heap capacity (fixed)</label><span class="diag-val" id="diag-capacity">—</span></div>
           <div class="field"><label>Largest free block</label><span class="diag-val" id="diag-largest">—</span></div>
           <div class="field"><label>Min ever free (since boot)</label><span class="diag-val" id="diag-min">—</span></div>
           <div class="field"><label>Total allocated</label><span class="diag-val" id="diag-alloc">—</span></div>
@@ -1041,6 +1047,17 @@
       $("#diag-largest").textContent = fmtB(heap.largest_free_block);
       $("#diag-min").textContent     = fmtB(heap.min_ever_free_bytes);
       $("#diag-alloc").textContent   = fmtB(heap.total_allocated_bytes);
+      $("#diag-capacity").textContent = fmtB(heap.capacity_bytes);
+      // Heap used + % of the fixed pre-reserved pool (no_std: the heap
+      // never grows, so a percentage is meaningful here).
+      if (typeof heap.total_used_bytes === "number" && heap.capacity_bytes > 0) {
+        const pct = (100 * heap.total_used_bytes / heap.capacity_bytes).toFixed(1);
+        $("#diag-used").textContent = fmtB(heap.total_used_bytes) + " (" + pct + "%)";
+      } else {
+        $("#diag-used").textContent = fmtB(heap.total_used_bytes);
+      }
+      $("#diag-uptime").textContent = (typeof d.uptime_s === "number") ? fmtUptime(d.uptime_s * 1000) : "—";
+      $("#diag-reset").textContent  = d.reset_reason || "—";
       if (heap.internal_free_bytes !== undefined) {
         $("#diag-internal-free").textContent = fmtB(heap.internal_free_bytes);
         $("#diag-internal-largest").textContent = fmtB(heap.internal_largest_free);

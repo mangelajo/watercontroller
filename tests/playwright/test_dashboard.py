@@ -2,7 +2,12 @@
 
 import re
 
+import pytest
 from playwright.sync_api import Page, expect
+
+# Reads status / round-trips switch state — no WiFi disruption, no
+# reboot — so the whole module is safe for the longevity loop.
+pytestmark = pytest.mark.longevity
 
 
 def test_dashboard_loads(page: Page, host_url: str):

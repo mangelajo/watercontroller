@@ -120,6 +120,20 @@ fn reset_reason_str() -> String {
     }
 }
 
+/// esp-backtrace `custom-halt` hook — invoked after the panic handler
+/// has printed the backtrace. esp-backtrace's default is `loop {}`,
+/// which wedges the device until a power-cycle; instead we reboot, so a
+/// panic (e.g. a transient OOM) self-heals. `esp-println` writes are
+/// blocking, so the backtrace is already on the wire — a short spin
+/// just drains the UART FIFO before the reset takes the line down.
+#[no_mangle]
+extern "Rust" fn custom_halt() -> ! {
+    for _ in 0..2_000_000 {
+        core::hint::spin_loop();
+    }
+    esp_hal::system::software_reset()
+}
+
 /// Which radio mode the firmware should bring up. Decided once at boot;
 /// switching between them is a reboot (the network stack binds to one
 /// interface for its lifetime).
@@ -211,6 +225,10 @@ impl Content for JsonStr {
 pub(crate) enum ApiResp {
     Json(String),
     NoContent,
+    /// A JSON body streamed chunk-by-chunk by picoserve through a fixed
+    /// buffer — so an arbitrarily large `Config` is never materialized
+    /// whole in RAM (the failure mode that OOM-panicked the device).
+    Stream(webapi::JsonView),
 }
 
 impl picoserve::response::IntoResponse for ApiResp {
@@ -223,6 +241,11 @@ impl picoserve::response::IntoResponse for ApiResp {
             ApiResp::Json(s) => JsonStr(s).write_to(connection, response_writer).await,
             ApiResp::NoContent => {
                 (picoserve::response::StatusCode::NO_CONTENT, picoserve::response::NoContent)
+                    .write_to(connection, response_writer)
+                    .await
+            }
+            ApiResp::Stream(view) => {
+                picoserve::response::Json(view)
                     .write_to(connection, response_writer)
                     .await
             }
@@ -321,7 +344,7 @@ impl AppWithStateBuilder for AppProps {
             .route(
                 ("/api", parse_path_segment::<Seg>()),
                 get(|seg: Seg, State(st): State<AppState>, q: picoserve::extract::Query<ApiQuery>| async move {
-                    JsonStr(webapi::api_get(&seg, &st, q.0.all.is_some()))
+                    webapi::api_get(&seg, &st, q.0.all.is_some())
                 })
                 .put(|seg: Seg, State(st): State<AppState>, body: alloc::vec::Vec<u8>| async move {
                     JsonStr(webapi::api_put(&seg, &st, &body))
@@ -333,7 +356,7 @@ impl AppWithStateBuilder for AppProps {
             .route(
                 ("/api/config", parse_path_segment::<Seg>()),
                 get(|sec: Seg, State(st): State<AppState>| async move {
-                    JsonStr(webapi::config_section_get(&sec, &st))
+                    webapi::config_section_get(&sec, &st)
                 })
                 .put(|sec: Seg, State(st): State<AppState>, body: alloc::vec::Vec<u8>| async move {
                     JsonStr(webapi::config_section_put(&sec, &st, &body))
@@ -392,9 +415,9 @@ async fn web_task(
     router: &'static AppRouter<AppProps>,
     state: &'static AppState,
 ) -> ! {
-    // RX is generous (4 KiB) so a streamed OTA upload keeps a healthy
-    // TCP window open across the handler's flash-write stalls.
-    let mut tcp_rx = [0u8; 4096];
+    // RX is 2 KiB — enough TCP window for a streamed OTA upload across
+    // the handler's flash-write stalls, at three of these in the pool.
+    let mut tcp_rx = [0u8; 2048];
     let mut tcp_tx = [0u8; 1024];
     let mut http_buf = [0u8; 2048];
     picoserve::Server::new(&router.shared().with_state(state), &SERVER_CONFIG, &mut http_buf)
@@ -445,12 +468,13 @@ async fn main(spawner: Spawner) -> ! {
 
     // The reclaimed-RAM pool (64 KiB) sits in a separate segment; the
     // regular pool shares the RWDATA segment with the executor stack,
-    // so it's kept small — 16 KiB — to leave the stack room. picoserve
+    // so it's kept small — 8 KiB — to leave the stack room. picoserve
     // polls its deeply-nested router on that stack and a route per
     // endpoint plus a serde_json `Config` deserialize would otherwise
-    // trip the stack guard.
+    // trip the stack guard. The 64 KiB reclaimed pool carries the bulk
+    // of live allocations (~48 KiB); the regular pool is slack.
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
-    esp_alloc::heap_allocator!(size: 16 * 1024);
+    esp_alloc::heap_allocator!(size: 8 * 1024);
 
     unsafe { BOOT_INSTANT = Some(Instant::now()); }
 

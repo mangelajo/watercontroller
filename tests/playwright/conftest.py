@@ -41,6 +41,15 @@ def pytest_addoption(parser):
         default=False,
         help="Run the long-running soak test (tests/playwright/test_soak.py).",
     )
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "longevity: read/write test safe to run repeatedly against a live "
+        "device — never disrupts WiFi and never reboots/resets the board. "
+        "Selected by `pytest -m longevity`; see `make longevity-test`.",
+    )
 DEVICE_BOOT_TIMEOUT_S = float(os.environ.get("WC_DEVICE_BOOT_TIMEOUT_S", "45"))
 # Pattern esp_netif prints to UART once DHCP lands. The supervisor's
 # follow-up `wifi: connected to <ssid> (<ip>)` line is also a fine
@@ -312,10 +321,17 @@ def _clean_device_config(real_target_url, device_console, term):
     """Session teardown: erase the device's persisted config so the box
     is left on defaults. Lets the NVS-mutating tests run against real
     hardware without stranding it (or the next run) in a dirty state.
-    No-op when not running against a real device."""
+    No-op when not running against a real device.
+
+    `WC_NO_CONFIG_RESET=1` skips the erase — used by the longevity loop,
+    which must leave the device running (the erase reboots it)."""
     yield
-    if real_target_url:
-        _erase_device_config(real_target_url, device_console, term)
+    if not real_target_url:
+        return
+    if os.environ.get("WC_NO_CONFIG_RESET", "").lower() in ("1", "true", "yes"):
+        term("config-reset: WC_NO_CONFIG_RESET set — leaving device config in place")
+        return
+    _erase_device_config(real_target_url, device_console, term)
 
 
 @pytest.fixture(scope="session")
